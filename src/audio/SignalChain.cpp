@@ -113,12 +113,17 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
         drained[numDrained++] = { midiRingBuffer[(size_t)scope.startIndex2 + i].targetSlotId,
                                    midiRingBuffer[(size_t)scope.startIndex2 + i].msg };
 
+    // Reused across slots so the per-slot MIDI buffer isn't heap-allocated on
+    // the RT thread every block (it was copy-constructed per slot before).
+    juce::MidiBuffer slotMidi;
     for (auto* slot : slots)
     {
         if (slot->processor && !slot->bypassed)
         {
-            // Build per-slot MIDI buffer from drained messages
-            juce::MidiBuffer slotMidi(midi); // start with pass-through MIDI
+            // Rebuild the per-slot MIDI from the shared pass-through input plus
+            // any messages targeted at this slot (or broadcast, slotId == -1).
+            slotMidi.clear();
+            slotMidi.addEvents(midi, 0, -1, 0);
             for (int i = 0; i < numDrained; ++i)
             {
                 if (drained[i].slotId == slot->id || drained[i].slotId == -1)

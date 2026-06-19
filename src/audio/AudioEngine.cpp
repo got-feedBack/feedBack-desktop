@@ -2455,6 +2455,12 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
                                       int numOutputChannels,
                                       int numSamples)
 {
+    // Split-mode output clock: this callback renders the backing track (phase
+    // vocoder + loudness leveler) and mixes it with the chain output. Those
+    // carry IIR/decay state too, so flush denormals here as well — the primary
+    // callback's ScopedNoDenormals does NOT reach this separate output thread.
+    const juce::ScopedNoDenormals noDenormals;
+
     juce::AudioBuffer<float> buffer(outputData, numOutputChannels, numSamples);
     if (numOutputChannels <= 0)
         return;
