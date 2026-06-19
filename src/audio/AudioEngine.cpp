@@ -1301,6 +1301,14 @@ bool AudioEngine::loadBackingTrack(const juce::File& file)
     cachedBackingDuration.store(backingTransport->getLengthInSeconds());
     cachedBackingPosition.store(0.0);
     backingHeardPositionSec.store(0.0, std::memory_order_relaxed);
+
+    // Reset the loudness leveler for the new song: clearing the cached sample
+    // rate forces renderBackingBlockLocked() to re-prepare() it on the next
+    // block, dropping the previous track's AGC gain + limiter state. Otherwise
+    // the ~300 ms gain follower would carry over and briefly mis-level the start
+    // of a much louder/quieter next song. Safe here — loadBackingTrack holds
+    // backingLock, the same lock the render path runs under.
+    backingLevelerSr = 0.0;
     std::cerr << "[AudioEngine] loadBackingTrack OK sr=" << readerSampleRate
               << " len=" << readerLengthInSamples
               << std::endl;

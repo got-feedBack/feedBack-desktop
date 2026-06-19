@@ -18,8 +18,22 @@
 
 #include <atomic>
 #include <cstring>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+ #include <emmintrin.h>   // _mm_pause for the cpuRelax() spin hint below
+#endif
 
 namespace slopsmith::sandbox {
+
+// CPU "relax" hint for short bounded spins: yields the pipeline to a
+// hyper-threaded sibling and lowers power vs. a bare load loop. No effect on
+// correctness — purely a spin-politeness hint, no-op where unavailable.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+ static inline void cpuRelax() noexcept { _mm_pause(); }
+#elif defined(__aarch64__) || defined(__arm__)
+ static inline void cpuRelax() noexcept { __asm__ __volatile__("yield" ::: "memory"); }
+#else
+ static inline void cpuRelax() noexcept {}
+#endif
 
 AudioChannel::AudioChannel() : impl(std::make_unique<Impl>()) {}
 
@@ -170,6 +184,7 @@ bool AudioChannel::popBlock(bool isOutputRing, juce::AudioBuffer<float>& dst,
         {
             w = writeIdx.load(std::memory_order_acquire);
             if (w != r) break;
+            cpuRelax();   // don't starve the HT sibling / burn power while spinning
         }
         if (w == r && !impl->waitEvent(isOutputRing, timeoutMs))
         {

@@ -1,11 +1,115 @@
 #include "SignalChain.h"
 #include "Sandbox/SandboxedProcessor.h"
 
+#if ! JUCE_WINDOWS
+ #include <csetjmp>
+ #include <csignal>
+ #include <mutex>
+#endif
+
 namespace {
 
+// Thrown after the POSIX fault guard longjmps back, to reuse the catch below.
+struct PluginFaulted {};
+
+#if ! JUCE_WINDOWS
+// ── POSIX in-process plugin fault guard ─────────────────────────────────────
+// On Windows, /EHa maps a plugin's structured exception (access violation) onto
+// a C++ exception that invokePlugin()'s catch(...) handles. POSIX has no such
+// mapping: a faulting in-process plugin raises SIGSEGV/SIGBUS/SIGFPE/SIGILL and,
+// uncaught, kills the whole app. These handlers, *only* while a guarded plugin
+// call is live on the current thread, siglongjmp() back into invokePlugin() so
+// the fault takes the same handled path as Windows — blocklist + leak + survive.
+//
+// Scope & limits:
+//  • The armed flag + landing pad are thread-local with the initial-exec TLS
+//    model, so the handler never takes the non-async-signal-safe lazy-TLS path.
+//    Only the thread actually inside a plugin call is redirected.
+//  • A fault anywhere else (e.g. a V8/GC SIGSEGV trap on a JS thread, or a
+//    sanitizer's handler) is chained to the handler we replaced, so we never
+//    mask a real crash. Installation happens on the first plugin call, well
+//    after V8/Node init, so the chained handler is theirs.
+//  • A stack-overflow fault is not reliably caught (no sigaltstack on JUCE's
+//    audio threads). The common plugin crash — a bad-pointer dereference — is.
+#if defined(__GNUC__) || defined(__clang__)
+ #define SC_TLS_IE __attribute__((tls_model("initial-exec")))
+#else
+ #define SC_TLS_IE
+#endif
+
+thread_local SC_TLS_IE sigjmp_buf g_pluginFaultPad;
+// volatile sig_atomic_t (not bool): this flag is read+written from the async
+// signal handler, where only a volatile sig_atomic_t (or lock-free atomic) is
+// well-defined to access. Per-thread (the signal is delivered to the faulting
+// thread), initial-exec TLS so the handler never hits lazy-TLS allocation.
+thread_local SC_TLS_IE volatile sig_atomic_t g_pluginGuardArmed = 0;
+
+struct SavedSigactions { struct sigaction segv, bus, fpe, ill; };
+SavedSigactions g_prevHandlers;
+std::once_flag  g_handlerOnce;
+
+const struct sigaction* previousHandlerFor(int sig) noexcept
+{
+    switch (sig)
+    {
+        case SIGSEGV: return &g_prevHandlers.segv;
+        case SIGBUS:  return &g_prevHandlers.bus;
+        case SIGFPE:  return &g_prevHandlers.fpe;
+        case SIGILL:  return &g_prevHandlers.ill;
+        default:      return nullptr;
+    }
+}
+
+void pluginFaultHandler(int sig, siginfo_t* info, void* ctx)
+{
+    if (g_pluginGuardArmed)
+    {
+        g_pluginGuardArmed = 0;
+        siglongjmp(g_pluginFaultPad, sig);   // async-signal-safe; restores mask
+    }
+
+    // Not inside a guarded plugin call → a genuine fault elsewhere. Chain to the
+    // handler we replaced rather than mask it.
+    if (const struct sigaction* prev = previousHandlerFor(sig))
+    {
+        if ((prev->sa_flags & SA_SIGINFO) && prev->sa_sigaction != nullptr)
+        {
+            prev->sa_sigaction(sig, info, ctx);
+            return;
+        }
+        if (! (prev->sa_flags & SA_SIGINFO))
+        {
+            if (prev->sa_handler == SIG_IGN) return;
+            if (prev->sa_handler != SIG_DFL && prev->sa_handler != nullptr)
+            {
+                prev->sa_handler(sig);
+                return;
+            }
+        }
+    }
+    // Default disposition: restore it and re-raise so the process crashes for real.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+void installPluginFaultHandlers()
+{
+    struct sigaction sa;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_sigaction = pluginFaultHandler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, &g_prevHandlers.segv);
+    sigaction(SIGBUS,  &sa, &g_prevHandlers.bus);
+    sigaction(SIGFPE,  &sa, &g_prevHandlers.fpe);
+    sigaction(SIGILL,  &sa, &g_prevHandlers.ill);
+}
+#endif // ! JUCE_WINDOWS
+
 // Catch a plugin fault — access violation, heap corruption, C++ exception —
-// rather than let it kill the host process. /EHa on this TU makes catch(...)
-// catch SEH on Windows too; on other platforms it covers C++ exceptions only.
+// rather than let it kill the host process. On Windows, /EHa on this TU makes
+// catch(...) catch the SEH access violation directly; on POSIX the crash arrives
+// as a signal, so we arm the thread-local fault guard above to convert it into
+// the same handled path.
 //
 // On fault: route future loads of the offending plugin through the
 // out-of-process sandbox (via the runtime crash blocklist), and *leak* the
@@ -17,12 +121,44 @@ template <typename Fn>
 inline void invokePlugin(ProcessorSlot& slot, Fn&& fn) noexcept
 {
     if (! slot.processor) return;
+
+#if ! JUCE_WINDOWS
+    std::call_once(g_handlerOnce, installPluginFaultHandlers);
+    // Captured before the try so the catch can restore it on every exit path.
+    // Set before the sigsetjmp and never mutated after, so it is well-defined
+    // post-longjmp (the setjmp indeterminate-value rule only bites locals that
+    // ARE modified between setjmp and longjmp).
+    const sig_atomic_t wasArmed = g_pluginGuardArmed;
+#endif
+
     try
     {
+#if ! JUCE_WINDOWS
+        // Arm the POSIX crash landing pad around the plugin call. sigsetjmp(.,1)
+        // saves the signal mask so the crash signal is unblocked again when the
+        // handler longjmps back. A non-zero return means the plugin faulted;
+        // route it into the shared catch below (which restores the guard state).
+        if (sigsetjmp(g_pluginFaultPad, 1) != 0)
+            throw PluginFaulted{};
+        g_pluginGuardArmed = 1;
+#endif
+
         fn(*slot.processor);
+
+#if ! JUCE_WINDOWS
+        g_pluginGuardArmed = wasArmed;
+#endif
     }
     catch (...)
     {
+#if ! JUCE_WINDOWS
+        // Restore the guard on EVERY exit from the guarded region. A normal C++
+        // exception from fn() bypasses the restore above and would otherwise
+        // leave this thread armed with a stale landing pad — so a later unrelated
+        // SIGSEGV/SIGBUS/… could be misread as a plugin fault and longjmp into a
+        // dead frame. (The signal-fault path arrives here too, via PluginFaulted.)
+        g_pluginGuardArmed = wasArmed;
+#endif
         // Best-effort blocklist update — addCrashedPlugin allocates (juce path
         // canonicalisation, StringArray.add) and locks a mutex, both of which
         // can throw under OOM or corruption. Swallow any exception here so the
@@ -175,16 +311,34 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
         for (auto* slot : slots) runSlot(slot, buffer);
         return;
     }
-    // Match the scratch length to this block (no realloc: capacity == blockSize).
-    branchScratch.setSize(2, numSamples, false, false, true);
-
+    // Locate the parallel region first, without processing anything yet (this
+    // only reads slot->branch): trunk-pre is the leading run of branch==0 slots
+    // [0,idx); the branch region is [idx,regionEnd); trunk-post is the rest.
     int idx = 0;
-    for (; idx < slots.size() && slots[idx]->branch == 0; ++idx)
-        runSlot(slots[idx], buffer);                          // trunk-pre, in place
+    while (idx < slots.size() && slots[idx]->branch == 0) ++idx;
 
     int regionEnd = idx, maxBranch = 0;                       // end just past last branch slot
     for (int k = idx; k < slots.size(); ++k)
         if (slots[k]->branch != 0) { regionEnd = k + 1; maxBranch = juce::jmax(maxBranch, slots[k]->branch); }
+
+    // Well-formedness guard: the node editor lays branches out contiguously, so
+    // every slot in [idx,regionEnd) must belong to a branch. A stray branch==0
+    // (trunk) slot interleaved here would be run by none of the loops below —
+    // silent signal loss. If that invariant is ever violated, fall back to a
+    // plain serial chain so no slot is dropped. Nothing has been processed in
+    // place yet, so the fallback is exact.
+    for (int k = idx; k < regionEnd; ++k)
+        if (slots[k]->branch == 0)
+        {
+            jassertfalse;   // malformed branch layout — see comment above
+            for (auto* slot : slots) runSlot(slot, buffer);
+            return;
+        }
+
+    // Match the scratch length to this block (no realloc: capacity == blockSize).
+    branchScratch.setSize(2, numSamples, false, false, true);
+
+    for (int k = 0; k < idx; ++k) runSlot(slots[k], buffer); // trunk-pre, in place
 
     for (int ch = 0; ch < 2; ++ch) splitScratch.copyFrom(ch, 0, buffer, ch, 0, numSamples);
     accumScratch.clear(0, numSamples);

@@ -37,11 +37,17 @@ juce::StringArray g_crashedPlugins;
 
 } // anonymous
 
-// Routing policy: every VST3 plugin loads via the out-of-process sandbox.
-// Non-VST3 processors (NAM, IR) stay in-process. (See the long rationale in the
-// git history / docs: plugins assume the host's message thread is the OS main
-// thread with STA COM — which the sandbox child provides and Electron's
-// background JUCE thread does not.)
+// Routing policy: by default VST3 plugins now load IN-PROCESS for playback (see
+// the rationale on the default return at the bottom of this function); only
+// previously-crashed or pre-seeded plugins are forced through the out-of-process
+// sandbox. Non-VST3 processors (NAM, IR) always stay in-process.
+//
+// In-process faults are made non-fatal by the guard in SignalChain.cpp (SEH on
+// Windows, a siglongjmp signal guard on POSIX): a faulting plugin is blocklisted
+// so its next load routes here to the sandbox. The sandbox child also provides
+// an OS-main-thread / STA-COM host that a few plugins assume and that Electron's
+// background JUCE thread does not — another reason a misbehaving plugin can be
+// pinned back to it via the blocklist.
 bool shouldSandbox(const juce::PluginDescription& desc)
 {
     const auto path = juce::File(desc.fileOrIdentifier);
@@ -50,7 +56,8 @@ bool shouldSandbox(const juce::PluginDescription& desc)
     if (!path.getFileName().endsWithIgnoreCase(".vst3"))
         return false;
 
-    // Runtime crash blocklist — diagnostic tagging only under sandbox-by-default.
+    // Runtime crash blocklist: a plugin that previously faulted in-process is
+    // forced back to the out-of-process sandbox on every subsequent load.
     {
         const std::lock_guard<std::mutex> lock(g_crashedPluginsMutex);
         const auto canonical = path.getFullPathName();
@@ -62,7 +69,7 @@ bool shouldSandbox(const juce::PluginDescription& desc)
         }
     }
 
-    // Pre-seed filename match — diagnostic tagging only.
+    // Pre-seed match: plugins known to need isolation are forced to the sandbox.
     const auto basename = path.getFileNameWithoutExtension();
     for (auto& needle : kDefaultNeedsSandboxFilenames)
     {
@@ -78,10 +85,11 @@ bool shouldSandbox(const juce::PluginDescription& desc)
     // it scanned cleanly (the sandbox's real job is crash-isolating the SCAN of
     // unknown plugins), so the common case is known-good and the out-of-process
     // IPC (N serial round-trips/block, memcpy, poll waits) is pure overhead and
-    // latency. Anything that DOES fault is caught and added to the runtime crash
-    // blocklist (or the launch sentinel) above, so it falls back to the sandbox
-    // on its next load. Net: known-good gear runs at native cost; only the
-    // genuinely crash-prone keeps paying for isolation.
+    // latency. Anything that DOES fault is caught by the SignalChain fault guard
+    // (SEH on Windows, a siglongjmp signal guard on POSIX) and added to the
+    // runtime crash blocklist (or the launch sentinel) above, so it falls back to
+    // the sandbox on its next load. Net: known-good gear runs at native cost;
+    // only the genuinely crash-prone keeps paying for isolation.
     VST_TRACE("shouldSandbox: %s — default policy: in-process (scanned/known-good)",
               desc.fileOrIdentifier.toRawUTF8());
     return false;
