@@ -1004,6 +1004,17 @@ export function initAudioBridge(): void {
         audio?.setBypass(slotId, bypassed);
     });
 
+    // Stereo routing (St-1/St-2).
+    ipcMain.handle('audio:setPan', (_event, slotId: number, pan: number) => {
+        audio?.setPan?.(slotId, pan);
+    });
+    ipcMain.handle('audio:setBranch', (_event, slotId: number, branch: number) => {
+        audio?.setBranch?.(slotId, branch);
+    });
+    ipcMain.handle('audio:setBranchSrc', (_event, slotId: number, src: number) => {
+        audio?.setBranchSrc?.(slotId, src);
+    });
+
     ipcMain.handle('audio:clearChain', () => {
         audio?.clearChain();
         vstSlotPaths.clear();

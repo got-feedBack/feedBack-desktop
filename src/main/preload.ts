@@ -366,6 +366,10 @@ const slopsmithDesktopApi = {
         removeProcessor: (slotId: number) => ipcRenderer.invoke('audio:removeProcessor', slotId),
         moveProcessor: (from: number, to: number) => ipcRenderer.invoke('audio:moveProcessor', from, to),
         setBypass: (slotId: number, bypassed: boolean) => ipcRenderer.invoke('audio:setBypass', slotId, bypassed),
+        // Stereo routing (St-1/St-2): per-slot pan + parallel branch + L/R source.
+        setPan: (slotId: number, pan: number) => ipcRenderer.invoke('audio:setPan', slotId, pan),
+        setBranch: (slotId: number, branch: number) => ipcRenderer.invoke('audio:setBranch', slotId, branch),
+        setBranchSrc: (slotId: number, src: number) => ipcRenderer.invoke('audio:setBranchSrc', slotId, src),
         clearChain: () => ipcRenderer.invoke('audio:clearChain'),
         getChainState: () => ipcRenderer.invoke('audio:getChainState'),
 
