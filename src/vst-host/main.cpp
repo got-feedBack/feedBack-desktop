@@ -671,7 +671,14 @@ void runAudioThread(HostState& st)
             continue;
         }
         if (auto* p = st.plugin.get())
+        {
+            // VST3s run OUT-OF-PROCESS here, so the host engine's RT FTZ/DAZ does
+            // NOT reach this DSP — flush denormals in the sandbox worker too, or
+            // amp/EQ/comp IIR tails spike CPU and stutter the audio. (Key fix for
+            // the user's all-VST chains.)
+            const juce::ScopedNoDenormals noDenormals;
             p->processBlock(buffer, midi);
+        }
         st.audio.pushBlock(/*isOutputRing=*/true, buffer, currentBlockSize);
     }
     // Defensive: any control-thread AudioPauseGuard waiting on us at the time

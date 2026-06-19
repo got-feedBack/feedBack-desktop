@@ -93,6 +93,10 @@ void SignalChain::releaseResources()
 
 void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    // FTZ/DAZ for the plugin chain — IIR tails decaying to denormals here are a
+    // major source of sporadic CPU spikes (see AudioEngine's RT callback note).
+    const juce::ScopedNoDenormals noDenormals;
+
     const juce::ScopedTryLock sl(lock);
     if (!sl.isLocked()) return;
 

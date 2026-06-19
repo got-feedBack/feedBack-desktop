@@ -1,5 +1,6 @@
 #pragma once
 #include "SourceChain.h"
+#include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -406,6 +407,10 @@ private:
     // Master output (post-mix) — engine-global, not per-source.
     std::atomic<float> outputGain{1.0f};
     std::atomic<float> backingVolume{0.7f};
+    // Per-song loudness normalizer for the backing track (applied in
+    // renderBackingBlockLocked, pre-fader). Owned + driven by the audio thread.
+    BackingLeveler backingLeveler;
+    double backingLevelerSr = 0.0;
     std::atomic<float> currentOutputLevel{0.0f};
     // Per-block RMS of the backing-track mix bus, written by the audio thread
     // and read on the main/JS thread via getBackingLevel(). Computed after the
