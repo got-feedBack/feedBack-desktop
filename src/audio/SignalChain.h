@@ -23,8 +23,13 @@ struct ProcessorSlot
     //            branch id form one parallel path; all branches read the same
     //            pre-split signal and their (panned) outputs are summed at merge.
     //            With no slot in a branch the chain runs exactly as before.
+    //   branchSrc : which channel of the split source this branch reads — 0 =
+    //            both (stereo), 1 = Left only, 2 = Right only. Lets a stereo-out
+    //            gear feed its L to one branch and R to another (St-2). Read from
+    //            any slot in the branch; 0 = full stereo (default).
     float pan = 0.0f;
     int branch = 0;
+    int branchSrc = 0;
 
     // For VST plugins — their state as base64 for preset save/load
     juce::MemoryBlock getState() const;
@@ -50,9 +55,11 @@ public:
     void moveProcessor(int fromIndex, int toIndex);
     void setBypass(int slotId, bool bypassed);
     void setMultiBypass(const juce::Array<std::pair<int, bool>>& changes);
-    // Stereo routing (St-1). pan: -1..+1. branch: 0 = trunk, >=1 = parallel id.
+    // Stereo routing (St-1/St-2). pan: -1..+1. branch: 0 = trunk, >=1 = parallel
+    // id. branchSrc: 0 = both, 1 = L, 2 = R (channel the branch reads from split).
     void setPan(int slotId, float pan);
     void setBranch(int slotId, int branch);
+    void setBranchSrc(int slotId, int src);
     void clear();
 
     // Info

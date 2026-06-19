@@ -2410,6 +2410,19 @@ static Napi::Value SetBranch(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+// setBranchSrc(slotId, 0=both/1=L/2=R): channel a branch reads from the split.
+static Napi::Value SetBranchSrc(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() >= 2)
+    {
+        int slotId = info[0].As<Napi::Number>().Int32Value();
+        int src = info[1].As<Napi::Number>().Int32Value();
+        liveEngine->getSignalChain().setBranchSrc(slotId, src);
+    }
+    return info.Env().Undefined();
+}
+
 // ── Chain State ───────────────────────────────────────────────────────────────
 
 static Napi::Value GetChainState(const Napi::CallbackInfo& info)
@@ -2431,6 +2444,7 @@ static Napi::Value GetChainState(const Napi::CallbackInfo& info)
             obj.Set("bypassed", slots[i]->bypassed);
             obj.Set("pan", slots[i]->pan);
             obj.Set("branch", slots[i]->branch);
+            obj.Set("branchSrc", slots[i]->branchSrc);
             obj.Set("hasEditor", slots[i]->processor && slots[i]->processor->hasEditor());
             result.Set((uint32_t)i, obj);
         }
@@ -2906,6 +2920,8 @@ public:
                     liveEngine->getSignalChain().setPan(slotId, (float)(double)slotObj->getProperty("pan"));
                 if (slotObj->hasProperty("branch"))
                     liveEngine->getSignalChain().setBranch(slotId, (int)slotObj->getProperty("branch"));
+                if (slotObj->hasProperty("branchSrc"))
+                    liveEngine->getSignalChain().setBranchSrc(slotId, (int)slotObj->getProperty("branchSrc"));
             }
 
             // Restore processor state
@@ -3149,6 +3165,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("setBypass", Napi::Function::New(env, SetBypass));
     exports.Set("setPan", Napi::Function::New(env, SetPan));
     exports.Set("setBranch", Napi::Function::New(env, SetBranch));
+    exports.Set("setBranchSrc", Napi::Function::New(env, SetBranchSrc));
     exports.Set("clearChain", Napi::Function::New(env, ClearChain));
     exports.Set("getChainState", Napi::Function::New(env, GetChainState));
     exports.Set("openPluginEditor", Napi::Function::New(env, OpenPluginEditor));

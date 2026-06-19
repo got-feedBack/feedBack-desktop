@@ -191,11 +191,24 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
 
     for (int b = 1; b <= maxBranch; ++b)
     {
+        // Which channel of the split source this branch reads (St-2): 0 = stereo,
+        // 1 = L only (→ both), 2 = R only (→ both). From the first slot that sets
+        // it; lets a stereo-out gear feed its L to one branch and R to another.
+        int bSrc = 0;
+        for (int k = idx; k < regionEnd; ++k)
+            if (slots[k]->branch == b && slots[k]->branchSrc != 0) { bSrc = slots[k]->branchSrc; break; }
+        const int srcL = (bSrc == 2) ? 1 : 0;
+        const int srcR = (bSrc == 1) ? 0 : 1;
         bool any = false;
         for (int k = idx; k < regionEnd; ++k)
         {
             if (slots[k]->branch != b) continue;
-            if (!any) { for (int ch = 0; ch < 2; ++ch) branchScratch.copyFrom(ch, 0, splitScratch, ch, 0, numSamples); any = true; }
+            if (!any)
+            {
+                branchScratch.copyFrom(0, 0, splitScratch, srcL, 0, numSamples);
+                branchScratch.copyFrom(1, 0, splitScratch, srcR, 0, numSamples);
+                any = true;
+            }
             runSlot(slots[k], branchScratch);
         }
         if (any)
@@ -295,6 +308,13 @@ void SignalChain::setBranch(int slotId, int branch)
     if (idx >= 0) slots[idx]->branch = juce::jmax(0, branch);
 }
 
+void SignalChain::setBranchSrc(int slotId, int src)
+{
+    const juce::ScopedLock sl(lock);
+    int idx = findSlotIndex(slotId);
+    if (idx >= 0) slots[idx]->branchSrc = juce::jlimit(0, 2, src);
+}
+
 void SignalChain::clear()
 {
     const juce::ScopedLock sl(lock);
@@ -390,8 +410,9 @@ juce::String SignalChain::savePreset() const
 
         // Stereo routing (St-1) — only emitted when non-default so existing mono
         // presets are byte-for-byte unchanged.
-        if (slot->pan != 0.0f)   slotObj->setProperty("pan", slot->pan);
-        if (slot->branch != 0)   slotObj->setProperty("branch", slot->branch);
+        if (slot->pan != 0.0f)       slotObj->setProperty("pan", slot->pan);
+        if (slot->branch != 0)       slotObj->setProperty("branch", slot->branch);
+        if (slot->branchSrc != 0)    slotObj->setProperty("branchSrc", slot->branchSrc);
 
         // Save processor state as base64
         auto state = slot->getState();
