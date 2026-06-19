@@ -34,6 +34,21 @@ inline void invokePlugin(ProcessorSlot& slot, Fn&& fn) noexcept
     }
 }
 
+// Constant-power pan applied to a stereo buffer in place. pan: -1 (L) .. +1 (R);
+// 0 = centre = unity on both channels (so the default leaves the signal
+// untouched). For the dual-mono amp output this acts as a normal pan-pot; for
+// genuinely stereo content it's an equal-power balance.
+inline void applyPan(juce::AudioBuffer<float>& buf, int numSamples, float pan) noexcept
+{
+    if (pan == 0.0f || buf.getNumChannels() < 2 || numSamples <= 0) return;
+    pan = juce::jlimit(-1.0f, 1.0f, pan);
+    const float theta = (pan + 1.0f) * 0.5f * juce::MathConstants<float>::halfPi; // 0..pi/2
+    const float gainL = std::cos(theta) * juce::MathConstants<float>::sqrt2;       // centre -> 1.0
+    const float gainR = std::sin(theta) * juce::MathConstants<float>::sqrt2;
+    buf.applyGain(0, 0, numSamples, gainL);
+    buf.applyGain(1, 0, numSamples, gainR);
+}
+
 } // namespace
 
 // ── ProcessorSlot ─────────────────────────────────────────────────────────────
@@ -66,6 +81,13 @@ void SignalChain::prepare(double sampleRate, int blockSize)
 {
     currentSampleRate = sampleRate;
     currentBlockSize = blockSize;
+
+    // Size the parallel-branch scratch once, off the audio thread. Stereo, the
+    // chain's fixed channel layout. avoidReallocating=true keeps the storage
+    // stable so the RT path never allocates.
+    splitScratch.setSize(2, blockSize, false, false, true);
+    branchScratch.setSize(2, blockSize, false, false, true);
+    accumScratch.setSize(2, blockSize, false, false, true);
 
     const juce::ScopedLock sl(lock);
     for (auto* slot : slots)
@@ -116,25 +138,73 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
     // Reused across slots so the per-slot MIDI buffer isn't heap-allocated on
     // the RT thread every block (it was copy-constructed per slot before).
     juce::MidiBuffer slotMidi;
-    for (auto* slot : slots)
+    const int numSamples = buffer.getNumSamples();
+
+    // Process one slot in place on `buf`: build its MIDI, run it, apply its pan.
+    auto runSlot = [&](ProcessorSlot* slot, juce::AudioBuffer<float>& buf)
     {
-        if (slot->processor && !slot->bypassed)
-        {
-            // Rebuild the per-slot MIDI from the shared pass-through input plus
-            // any messages targeted at this slot (or broadcast, slotId == -1).
-            slotMidi.clear();
-            slotMidi.addEvents(midi, 0, -1, 0);
-            for (int i = 0; i < numDrained; ++i)
-            {
-                if (drained[i].slotId == slot->id || drained[i].slotId == -1)
-                    slotMidi.addEvent(drained[i].msg, 0);
-            }
-            invokePlugin(*slot, [&](juce::AudioProcessor& p)
-            {
-                p.processBlock(buffer, slotMidi);
-            });
-        }
+        if (!slot->processor || slot->bypassed) return;
+        slotMidi.clear();
+        slotMidi.addEvents(midi, 0, -1, 0);
+        for (int i = 0; i < numDrained; ++i)
+            if (drained[i].slotId == slot->id || drained[i].slotId == -1)
+                slotMidi.addEvent(drained[i].msg, 0);
+        invokePlugin(*slot, [&](juce::AudioProcessor& p) { p.processBlock(buf, slotMidi); });
+        applyPan(buf, numSamples, slot->pan);
+    };
+
+    // Fast path: no parallel branch → plain serial chain. Behaviour is unchanged
+    // vs before (pan defaults to 0, so applyPan is a no-op and existing tones are
+    // bit-identical).
+    bool hasBranch = false;
+    for (auto* slot : slots) if (slot->branch != 0) { hasBranch = true; break; }
+    if (!hasBranch)
+    {
+        for (auto* slot : slots) runSlot(slot, buffer);
+        return;
     }
+
+    // Parallel path. Slot order (the node editor guarantees it):
+    //   [ trunk-pre (branch 0) ][ parallel branches (branch >=1) ][ trunk-post (branch 0) ]
+    // Trunk-pre runs in place and its result is the split source every branch
+    // reads; each branch runs on its own copy, is panned, and summed into the
+    // merge bus; trunk-post then runs on the merged signal. Stereo scratch only —
+    // fall back to serial for a non-stereo or oversized block (can't pan/sum).
+    if (buffer.getNumChannels() < 2 || numSamples > currentBlockSize)
+    {
+        for (auto* slot : slots) runSlot(slot, buffer);
+        return;
+    }
+    // Match the scratch length to this block (no realloc: capacity == blockSize).
+    branchScratch.setSize(2, numSamples, false, false, true);
+
+    int idx = 0;
+    for (; idx < slots.size() && slots[idx]->branch == 0; ++idx)
+        runSlot(slots[idx], buffer);                          // trunk-pre, in place
+
+    int regionEnd = idx, maxBranch = 0;                       // end just past last branch slot
+    for (int k = idx; k < slots.size(); ++k)
+        if (slots[k]->branch != 0) { regionEnd = k + 1; maxBranch = juce::jmax(maxBranch, slots[k]->branch); }
+
+    for (int ch = 0; ch < 2; ++ch) splitScratch.copyFrom(ch, 0, buffer, ch, 0, numSamples);
+    accumScratch.clear(0, numSamples);
+
+    for (int b = 1; b <= maxBranch; ++b)
+    {
+        bool any = false;
+        for (int k = idx; k < regionEnd; ++k)
+        {
+            if (slots[k]->branch != b) continue;
+            if (!any) { for (int ch = 0; ch < 2; ++ch) branchScratch.copyFrom(ch, 0, splitScratch, ch, 0, numSamples); any = true; }
+            runSlot(slots[k], branchScratch);
+        }
+        if (any)
+            for (int ch = 0; ch < 2; ++ch) accumScratch.addFrom(ch, 0, branchScratch, ch, 0, numSamples);
+    }
+
+    for (int ch = 0; ch < 2; ++ch) buffer.copyFrom(ch, 0, accumScratch, ch, 0, numSamples);
+    for (int k = regionEnd; k < slots.size(); ++k)              // trunk-post on the merged bus
+        runSlot(slots[k], buffer);
 }
 
 void SignalChain::queueMidiMessage(int targetSlotId, const juce::MidiMessage& msg)
@@ -209,6 +279,20 @@ void SignalChain::setMultiBypass(const juce::Array<std::pair<int, bool>>& change
         int idx = findSlotIndex(slotId);
         if (idx >= 0) slots[idx]->bypassed = bypassed;
     }
+}
+
+void SignalChain::setPan(int slotId, float pan)
+{
+    const juce::ScopedLock sl(lock);
+    int idx = findSlotIndex(slotId);
+    if (idx >= 0) slots[idx]->pan = juce::jlimit(-1.0f, 1.0f, pan);
+}
+
+void SignalChain::setBranch(int slotId, int branch)
+{
+    const juce::ScopedLock sl(lock);
+    int idx = findSlotIndex(slotId);
+    if (idx >= 0) slots[idx]->branch = juce::jmax(0, branch);
 }
 
 void SignalChain::clear()
@@ -303,6 +387,11 @@ juce::String SignalChain::savePreset() const
         slotObj->setProperty("name", slot->name);
         slotObj->setProperty("path", slot->path);
         slotObj->setProperty("bypassed", slot->bypassed);
+
+        // Stereo routing (St-1) — only emitted when non-default so existing mono
+        // presets are byte-for-byte unchanged.
+        if (slot->pan != 0.0f)   slotObj->setProperty("pan", slot->pan);
+        if (slot->branch != 0)   slotObj->setProperty("branch", slot->branch);
 
         // Save processor state as base64
         auto state = slot->getState();

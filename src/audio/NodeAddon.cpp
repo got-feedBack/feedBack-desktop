@@ -2385,6 +2385,31 @@ static Napi::Value ClearChain(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+// Stereo routing (St-1). setPan(slotId, -1..+1); setBranch(slotId, 0=trunk/>=1).
+static Napi::Value SetPan(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() >= 2)
+    {
+        int slotId = info[0].As<Napi::Number>().Int32Value();
+        float pan = (float) info[1].As<Napi::Number>().DoubleValue();
+        liveEngine->getSignalChain().setPan(slotId, pan);
+    }
+    return info.Env().Undefined();
+}
+
+static Napi::Value SetBranch(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() >= 2)
+    {
+        int slotId = info[0].As<Napi::Number>().Int32Value();
+        int branch = info[1].As<Napi::Number>().Int32Value();
+        liveEngine->getSignalChain().setBranch(slotId, branch);
+    }
+    return info.Env().Undefined();
+}
+
 // ── Chain State ───────────────────────────────────────────────────────────────
 
 static Napi::Value GetChainState(const Napi::CallbackInfo& info)
@@ -2404,6 +2429,8 @@ static Napi::Value GetChainState(const Napi::CallbackInfo& info)
             obj.Set("name", slots[i]->name.toStdString());
             obj.Set("path", slots[i]->path.toStdString());
             obj.Set("bypassed", slots[i]->bypassed);
+            obj.Set("pan", slots[i]->pan);
+            obj.Set("branch", slots[i]->branch);
             obj.Set("hasEditor", slots[i]->processor && slots[i]->processor->hasEditor());
             result.Set((uint32_t)i, obj);
         }
@@ -2871,6 +2898,16 @@ public:
             if (bypassed && slotId >= 0)
                 liveEngine->getSignalChain().setBypass(slotId, true);
 
+            // Stereo routing (St-1). Absent keys read back as 0 (= default), so
+            // mono presets restore exactly as before.
+            if (slotId >= 0)
+            {
+                if (slotObj->hasProperty("pan"))
+                    liveEngine->getSignalChain().setPan(slotId, (float)(double)slotObj->getProperty("pan"));
+                if (slotObj->hasProperty("branch"))
+                    liveEngine->getSignalChain().setBranch(slotId, (int)slotObj->getProperty("branch"));
+            }
+
             // Restore processor state
             if (stateB64.isNotEmpty() && slotId >= 0)
             {
@@ -3110,6 +3147,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("removeProcessor", Napi::Function::New(env, RemoveProcessor));
     exports.Set("moveProcessor", Napi::Function::New(env, MoveProcessor));
     exports.Set("setBypass", Napi::Function::New(env, SetBypass));
+    exports.Set("setPan", Napi::Function::New(env, SetPan));
+    exports.Set("setBranch", Napi::Function::New(env, SetBranch));
     exports.Set("clearChain", Napi::Function::New(env, ClearChain));
     exports.Set("getChainState", Napi::Function::New(env, GetChainState));
     exports.Set("openPluginEditor", Napi::Function::New(env, OpenPluginEditor));

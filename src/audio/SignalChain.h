@@ -16,6 +16,16 @@ struct ProcessorSlot
     bool bypassed = false;
     int id = 0;
 
+    // Stereo routing (pan-only stereo, St-1).
+    //   pan    : -1 = full left … 0 = centre … +1 = full right (constant-power),
+    //            applied to this slot's output. 0 (default) = no-op → unchanged.
+    //   branch : 0 = trunk (serial). >=1 = a parallel branch id. Slots sharing a
+    //            branch id form one parallel path; all branches read the same
+    //            pre-split signal and their (panned) outputs are summed at merge.
+    //            With no slot in a branch the chain runs exactly as before.
+    float pan = 0.0f;
+    int branch = 0;
+
     // For VST plugins — their state as base64 for preset save/load
     juce::MemoryBlock getState() const;
     void setState(const juce::MemoryBlock& state);
@@ -40,6 +50,9 @@ public:
     void moveProcessor(int fromIndex, int toIndex);
     void setBypass(int slotId, bool bypassed);
     void setMultiBypass(const juce::Array<std::pair<int, bool>>& changes);
+    // Stereo routing (St-1). pan: -1..+1. branch: 0 = trunk, >=1 = parallel id.
+    void setPan(int slotId, float pan);
+    void setBranch(int slotId, int branch);
     void clear();
 
     // Info
@@ -80,6 +93,13 @@ private:
 
     double currentSampleRate = 48000.0;
     int currentBlockSize = 256;
+
+    // Pre-allocated scratch for parallel-branch mixing (St-1). Sized in
+    // prepare(); never resized on the audio thread. Only touched when the chain
+    // actually has a parallel branch — the all-trunk path uses none of these.
+    juce::AudioBuffer<float> splitScratch;   // snapshot of the pre-split signal
+    juce::AudioBuffer<float> branchScratch;  // working buffer for one branch
+    juce::AudioBuffer<float> accumScratch;   // summed branch outputs (merge bus)
 
     // Lock-free SPSC MIDI queue (N-API thread writes, audio thread reads)
     struct PendingMidiMessage { int targetSlotId = -1; juce::MidiMessage msg; };
