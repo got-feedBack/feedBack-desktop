@@ -317,8 +317,13 @@ void SignalChain::setBranchSrc(int slotId, int src)
 
 void SignalChain::clear()
 {
-    const juce::ScopedLock sl(lock);
-    slots.clear();
+    // Detach the slots under a BRIEF lock, then destroy them OFF the lock. The
+    // destructors tear down sandbox subprocesses (IPC + waits) which is slow;
+    // doing that while holding `lock` starved the RT process() ScopedTryLock and
+    // dropped audio blocks → the "scratches" heard whenever a chain reloads.
+    juce::OwnedArray<ProcessorSlot> dead;
+    { const juce::ScopedLock sl(lock); slots.swapWith(dead); }
+    dead.clear();
 }
 
 int SignalChain::getNumSlots() const
@@ -375,6 +380,15 @@ void SignalChain::setParameter(int slotId, int paramIndex, float value)
 
     auto* proc = slots[idx]->processor.get();
     if (!proc) return;
+
+    // Out-of-process VSTs expose no JUCE parameter proxies, so forward the change
+    // over the control pipe — otherwise knob/preset automation never reaches the
+    // sandboxed plugin and tones play at their defaults.
+    if (auto* sp = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(proc))
+    {
+        sp->setSandboxedParameter(paramIndex, value);
+        return;
+    }
 
     auto& params = proc->getParameters();
     if (paramIndex >= 0 && paramIndex < params.size())

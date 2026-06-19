@@ -65,6 +65,9 @@ public:
     // this and inserts silence rather than blocking.
     bool isAlive() const noexcept;
 
+    // Forward a parameter change to the sandboxed plugin over the control pipe.
+    void setSandboxedParameter(int index, float value);
+
     // Callback fired when the subprocess unexpectedly exits or its control
     // pipe breaks. Always invoked from a background thread; mutex-guarded
     // so concurrent assignment from the owner thread + read from the I/O

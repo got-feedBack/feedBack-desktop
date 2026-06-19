@@ -413,6 +413,15 @@ void SandboxedProcessor::requestCloseEditor()
     control->postNoReply(op::kCloseEditor, {});
 }
 
+void SandboxedProcessor::setSandboxedParameter(int index, float value)
+{
+    if (!control || !isAlive() || index < 0) return;
+    juce::DynamicObject::Ptr args = new juce::DynamicObject();
+    args->setProperty("index", index);
+    args->setProperty("value", (double) value);
+    control->postNoReply(op::kSetParameter, juce::var(args.get()));
+}
+
 bool SandboxedProcessor::isAlive() const noexcept
 {
     return alive.load(std::memory_order_acquire);

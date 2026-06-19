@@ -74,9 +74,17 @@ bool shouldSandbox(const juce::PluginDescription& desc)
         }
     }
 
-    VST_TRACE("shouldSandbox: %s — default policy (every VST3 sandboxes)",
+    // Default: load in-process for PLAYBACK. A plugin reaches a chain only after
+    // it scanned cleanly (the sandbox's real job is crash-isolating the SCAN of
+    // unknown plugins), so the common case is known-good and the out-of-process
+    // IPC (N serial round-trips/block, memcpy, poll waits) is pure overhead and
+    // latency. Anything that DOES fault is caught and added to the runtime crash
+    // blocklist (or the launch sentinel) above, so it falls back to the sandbox
+    // on its next load. Net: known-good gear runs at native cost; only the
+    // genuinely crash-prone keeps paying for isolation.
+    VST_TRACE("shouldSandbox: %s — default policy: in-process (scanned/known-good)",
               desc.fileOrIdentifier.toRawUTF8());
-    return true;
+    return false;
 }
 
 std::unique_ptr<juce::AudioProcessor> tryLoadSandboxed(

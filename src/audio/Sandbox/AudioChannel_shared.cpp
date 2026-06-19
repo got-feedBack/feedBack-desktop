@@ -158,7 +158,20 @@ bool AudioChannel::popBlock(bool isOutputRing, juce::AudioBuffer<float>& dst,
     uint64_t w = writeIdx.load(std::memory_order_acquire);
     if (w == r)
     {
-        if (!impl->waitEvent(isOutputRing, timeoutMs))
+        // Bounded busy-spin before the blocking wait: a fast plugin lands its
+        // output a few microseconds after we checked, so spinning on the write
+        // index catches the common case without paying the poll() syscall + the
+        // cross-process doorbell wakeup latency — which, multiplied across an
+        // N-plugin chain, is a big slice of the per-block budget. A slow plugin
+        // exits the (short) spin still empty and falls through to the efficient
+        // blocking wait, so correctness and CPU cost for heavy chains are unchanged.
+        constexpr int kPopSpinIters = 2000;
+        for (int s = 0; s < kPopSpinIters; ++s)
+        {
+            w = writeIdx.load(std::memory_order_acquire);
+            if (w != r) break;
+        }
+        if (w == r && !impl->waitEvent(isOutputRing, timeoutMs))
         {
             atomicAt(impl->header->dropouts).fetch_add(1, std::memory_order_relaxed);
             return false;
