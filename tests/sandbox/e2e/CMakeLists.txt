@@ -96,6 +96,35 @@ add_test(NAME sandbox_e2e_test
         "$<TARGET_FILE:slopsmith-vst-host>"
         "${CMAKE_BINARY_DIR}/SlopPassThrough_artefacts/$<CONFIG>/VST3/SlopPassThrough.vst3")
 
+# --- in-process plugin fault-guard integration test ---
+# Builds the REAL SignalChain against the full sandbox set and drives a
+# deliberately-segfaulting in-process plugin through SignalChain::process();
+# asserts invokePlugin()'s fault guard (POSIX siglongjmp / Windows SEH) keeps the
+# host alive, releases the processor, and blocklists it. No subprocess / VST3
+# fixture needed — the faulting plugin is an in-process AudioProcessor.
+add_executable(signalchain_fault_test
+    signalchain_fault_test.cpp
+    "${REPO_ROOT}/src/audio/SignalChain.cpp"
+    "${SANDBOX}/SandboxedProcessor.cpp"
+    "${SANDBOX}/SandboxFactory_shared.cpp" "${SANDBOX}/SandboxFactory_posix.cpp"
+    "${SANDBOX}/AudioChannel_shared.cpp"   "${SANDBOX}/AudioChannel_posix.cpp"
+    "${SANDBOX}/ControlChannel_shared.cpp" "${SANDBOX}/ControlChannel_posix.cpp"
+    "${SANDBOX}/SubprocessHandle_posix.cpp"
+    "${SANDBOX}/Protocol.cpp")
+target_include_directories(signalchain_fault_test PRIVATE "${REPO_ROOT}/src/audio")
+target_link_libraries(signalchain_fault_test PRIVATE
+    juce::juce_audio_basics juce::juce_audio_devices juce::juce_audio_formats
+    juce::juce_audio_processors juce::juce_core juce::juce_data_structures
+    juce::juce_dsp juce::juce_events)
+target_compile_definitions(signalchain_fault_test PRIVATE
+    JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_STANDALONE_APPLICATION=0 JUCE_REPORT_APP_USAGE=0
+    # The guard INTENTIONALLY leaks the faulting processor (destructing it on a
+    # corrupted heap is the very hazard it avoids), so JUCE's leak detector would
+    # fire a Debug assertion at shutdown for a by-design leak. Disable it here.
+    JUCE_CHECK_MEMORY_LEAKS=0)
+add_test(NAME signalchain_fault_test COMMAND signalchain_fault_test)
+
 # Orphan-cleanup regression (issue #265): host crash → child must not orphan.
 # Linux-only — the driver's leak path + PR_SET_PDEATHSIG are JUCE_LINUX-gated;
 # on macOS the env var is a no-op so this would assert clean-shutdown, not the
