@@ -1,7 +1,7 @@
 {
   "name": "slopsmith-desktop",
   "version": "0.2.9",
-  "description": "Slopsmith desktop app with integrated audio engine, VST hosting, and amp modeling",
+  "description": "fee[dB]ack desktop app with integrated audio engine, VST hosting, and amp modeling",
   "author": {
     "name": "Byron",
     "email": "byron@ougsoft.com"
@@ -30,7 +30,9 @@
   },
   "build": {
     "appId": "com.byron.slopsmith-desktop",
-    "productName": "Slopsmith",
+    "productName": "fee[dB]ack",
+    "executableName": "feedback",
+    "artifactName": "feedback-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -109,7 +111,7 @@
       "entitlementsInherit": "resources/entitlements.mac.plist",
       "notarize": true,
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Slopsmith needs microphone access for guitar input and note detection."
+        "NSMicrophoneUsageDescription": "fee[dB]ack needs microphone access for guitar input and note detection."
       },
       "files": [
         "build/Release/slopsmith-vst-scan",

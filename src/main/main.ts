@@ -46,8 +46,8 @@ if (process.platform !== 'linux') {
         const { app, dialog } = require('electron');
         if (app.isPackaged) {
             dialog.showErrorBox(
-                'Slopsmith update system error',
-                'The Velopack updater failed to initialize. Slopsmith will still '
+                'fee[dB]ack update system error',
+                'The Velopack updater failed to initialize. fee[dB]ack will still '
                 + 'run, but automatic updates may not work until it is reinstalled.'
                 + `\n\n${String(err)}`,
             );
@@ -66,8 +66,8 @@ import { execFileSync } from 'child_process';
 // run before app.whenReady(). uploadToServer:false keeps dumps local — they
 // can be inspected with WinDbg / minidump-stackwalk.
 crashReporter.start({
-    productName: 'slopsmith-desktop',
-    companyName: 'slopsmith',
+    productName: 'feedback-desktop',
+    companyName: 'feedback',
     submitURL: '',
     uploadToServer: false,
     compress: false,
@@ -260,8 +260,8 @@ function failRendererStartup(reason: string): void {
     publishStartupStatus({ message: reason, phase: 'error', running: false });
     if (mainWindow && !mainWindow.isDestroyed()) {
         dialog.showErrorBox(
-            'Slopsmith failed to start',
-            'The app window did not finish loading. Please restart Slopsmith. '
+            'fee[dB]ack failed to start',
+            'The app window did not finish loading. Please restart fee[dB]ack. '
             + 'If the problem persists, check the backend logs.',
         );
     }
@@ -280,7 +280,7 @@ function createSplashWindow(): void {
         fullscreenable: false,
         frame: false,
         show: true,
-        title: 'Slopsmith',
+        title: 'fee[dB]ack',
         backgroundColor: '#050508',
         webPreferences: {
             preload: path.join(__dirname, 'splash-preload.js'),
@@ -404,7 +404,7 @@ function createWindow(port: number): void {
         height: 900,
         minWidth: 800,
         minHeight: 600,
-        title: 'Slopsmith',
+        title: 'fee[dB]ack',
         backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
         webPreferences: rendererWebPreferences,
     });
@@ -444,7 +444,7 @@ function createWindow(port: number): void {
             // Retries are exhausted — the renderer will never paint. Surface the
             // failure now rather than letting the splash spin until the safety
             // timer's full deadline (the give-up budget is well under it).
-            failRendererStartup(`The app window failed to load (network error ${errorCode}). Please restart Slopsmith.`);
+            failRendererStartup(`The app window failed to load (network error ${errorCode}). Please restart fee[dB]ack.`);
             return;
         }
         retryCount += 1;
@@ -869,7 +869,7 @@ async function ensureMicrophoneAccess(): Promise<void> {
             // explains a silent input; the user must re-enable via System
             // Settings (or `tccutil reset Microphone`).
             console.warn(`[main] Microphone access is '${status}'; the OS will not re-prompt. ` +
-                'Enable Slopsmith under System Settings → Privacy & Security → Microphone.');
+                'Enable fee[dB]ack under System Settings → Privacy & Security → Microphone.');
             return;
         }
         // status === 'not-determined' → this triggers the one-time OS prompt.
@@ -1065,7 +1065,7 @@ async function startup(): Promise<void> {
         // arrives). The retry-exhaustion case surfaces earlier via the
         // did-fail-load give-up branch; failRendererStartup() is idempotent so
         // whichever path fires first wins.
-        failRendererStartup('The app window failed to load. Please restart Slopsmith.');
+        failRendererStartup('The app window failed to load. Please restart fee[dB]ack.');
     }, SPLASH_RENDERER_DEADLINE_MS);
 }
 
