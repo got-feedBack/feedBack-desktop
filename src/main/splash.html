@@ -18,10 +18,10 @@
 <body>
 <div class="wrap">
   <div class="card">
-    <div class="brand">Slopsmith</div>
+    <div class="brand">fee[dB]ack</div>
     <div class="sub">Starting up — first launch may take a moment</div>
     <div class="anim"><div id="lottie-spinner"></div></div>
-    <div id="status" class="status">Starting Slopsmith...</div>
+    <div id="status" class="status">Starting fee[dB]ack...</div>
     <div id="count" class="count"></div>
   </div>
 </div>
@@ -47,7 +47,7 @@
     var countEl = document.getElementById('count');
     function render(status) {
         if (!status) return;
-        statusEl.textContent = status.message || 'Starting Slopsmith...';
+        statusEl.textContent = status.message || 'Starting fee[dB]ack...';
         if (status.total > 0) {
             countEl.textContent = (status.loaded || 0) + ' / ' + status.total;
         } else {

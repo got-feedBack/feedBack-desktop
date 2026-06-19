@@ -209,7 +209,7 @@ const SPLASH_CLOSE_DELAY_MS = 300;
 let startupStatusSnapshot: StartupStatus = {
     running: true,
     phase: 'booting',
-    message: 'Starting Slopsmith...',
+    message: 'Starting fee[dB]ack...',
     currentPlugin: '',
     loaded: 0,
     total: 0,
