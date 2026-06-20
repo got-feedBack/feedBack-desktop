@@ -163,6 +163,8 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-transpose-chords
 		got-feedback/feedback-plugin-tutorials
 		got-feedback/feedback-plugin-update-manager
+		# Rig Builder (NAM tone builder) — repo is not under the feedback-plugin-* prefix.
+		got-feedback/rig_builder
 	)
 
 	local total=0
