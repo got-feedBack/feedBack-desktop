@@ -73,7 +73,8 @@ bundle_with_deps() {
 # will hard-fail later if it's missing — fail here with the actual cause
 # rather than letting that downstream check produce a less-direct error.
 if command -v ffmpeg >/dev/null 2>&1; then
-    cp "$(which ffmpeg)" "$BIN_DIR/"
+    FFMPEG_SRC="$(command -v ffmpeg)"
+    cp "$FFMPEG_SRC" "$BIN_DIR/"
     echo " ffmpeg: $(ls -lh "$BIN_DIR/ffmpeg" | awk '{print $5}')"
 else
     echo "ERROR: ffmpeg not found on PATH; resources/bin/ffmpeg is required for the bundled build (apt: ffmpeg / brew: ffmpeg)." >&2
@@ -85,7 +86,14 @@ fi
 # at runtime on user machines. The lib/sloppak_convert.py fallback to
 # the built-in `vorbis -strict experimental` encoder is a safety net for
 # unbundled installs, not a license to ship a libvorbis-less binary.
-if ! "$BIN_DIR/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -wq libvorbis; then
+# Capture the encoder list into a variable BEFORE grepping. Piping ffmpeg
+# straight into `grep -wq` is racy under `set -o pipefail`: grep -q exits on the
+# first match and closes the pipe, ffmpeg then takes SIGPIPE (141) mid-write, and
+# pipefail makes the whole pipeline return 141 instead of grep's 0 — so the guard
+# intermittently "fails" even though libvorbis is present (reproducible on Docker
+# Desktop). Capturing first removes the pipe from ffmpeg entirely.
+FFMPEG_ENCODERS="$("$FFMPEG_SRC" -hide_banner -encoders 2>/dev/null || true)"
+if ! printf '%s\n' "$FFMPEG_ENCODERS" | grep -wq libvorbis; then
     echo "ERROR: bundled ffmpeg lacks libvorbis encoder. Sloppak conversion would fall back to the lower-quality built-in vorbis encoder on user machines." >&2
     echo "Install an ffmpeg built with --enable-libvorbis (apt's ffmpeg ships it by default; check your distro's package if this fails)." >&2
     exit 1
