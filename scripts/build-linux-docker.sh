@@ -81,6 +81,8 @@ docker run \
     -e ELECTRON_CACHE=/home/vscode/.cache/electron \
     -e ELECTRON_BUILDER_CACHE=/home/vscode/.cache/electron-builder \
     -e GIT_TERMINAL_PROMPT=0 \
+    -e "GH_CLONE_TOKEN=${GH_CLONE_TOKEN:-}" \
+    -e "SLOPSMITH_REF=${SLOPSMITH_REF:-main}" \
     -t \
     slopsmith-ubuntu-builder \
     bash -c './scripts/build-linux-ubuntu.sh'

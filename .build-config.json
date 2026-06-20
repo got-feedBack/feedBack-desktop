@@ -4,7 +4,8 @@
     "python": "3.12.9",
     "electron": "35.0.0",
     "cmake": "3.22",
-    "ubuntu": "22.04"
+    "ubuntu": "22.04",
+    "dotnet": "8.0"
   },
   "external": {
     "fluidsynth_windows": {
