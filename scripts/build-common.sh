@@ -198,6 +198,20 @@ clone_slopsmith() {
 		fi
 	done
 
+	# Strip dangling symlinks from the bundled tree. Some plugins ship
+	# build-time symlinks into sources that aren't present at runtime (e.g.
+	# rig_builder's vst/src/racks/DPF -> DISTRHO framework). A broken symlink
+	# is harmless on Linux/squashfs, but on macOS it BREAKS codesign ("a
+	# sealed resource is missing or invalid" -> the app reads as "damaged")
+	# AND breaks `xattr -dr com.apple.quarantine` (it aborts on the dangling
+	# link, so the quarantine-removal workaround can't complete). Remove them.
+	local _dangling
+	_dangling=$(find "$clone_dir" -type l ! -exec test -e {} \; -print 2>/dev/null | wc -l | tr -d ' ')
+	if [[ "${_dangling:-0}" != "0" ]]; then
+		find "$clone_dir" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+		echo "Stripped ${_dangling} dangling symlink(s) from the bundled tree (macOS codesign safety)"
+	fi
+
 	export SLOPSMITH_DIR="$clone_dir"
 	echo "Cloned ${cloned} of ${total} plugins"
 	cd - >/dev/null
