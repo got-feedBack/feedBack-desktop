@@ -323,15 +323,18 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         typeList.forEach((typeInfo) => {
             const typeName = typeInfo && typeInfo.name ? String(typeInfo.name) : '';
             const inputs = Array.isArray(typeInfo && typeInfo.inputs) ? typeInfo.inputs : [];
-            inputs.forEach((_deviceName, index) => {
+            inputs.forEach((deviceName, index) => {
                 const logicalSourceKey = `desktop-audio:${safeKeyPart(typeName)}:input:${index}`;
+                const realName = (typeof deviceName === 'string' && deviceName.trim())
+                    ? deviceName.trim()
+                    : `Desktop input ${index + 1}`;
                 audioSession.registerInputSource({
                     sourceId: `audio_engine:${logicalSourceKey}`,
                     logicalSourceKey,
                     providerId: 'audio_engine',
                     ownerPluginId: 'audio_engine',
                     kind: 'instrument',
-                    labelPseudonym: `Desktop input ${index + 1}`,
+                    labelPseudonym: realName,
                     labelSafe: true,
                     availability: 'available',
                     sourceMode: 'native',
