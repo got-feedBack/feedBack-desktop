@@ -117,11 +117,11 @@ clone_slopsmith() {
 
 	# Clone bundled plugins. Format per entry:
 	#   <owner>/<repo>[@<branch>][:<dirname>]
-	# Dirname defaults to <repo> minus the "slopsmith-plugin-" prefix
+	# Dirname defaults to <repo> minus the "feedback-plugin-" prefix
 	# with hyphens replaced by underscores (slopsmith treats plugin
 	# directories as Python module names, which can't contain dashes).
 	# Provide an explicit dirname after a colon for repos that don't
-	# follow the slopsmith-plugin-* naming convention. An optional
+	# follow the feedback-plugin-* naming convention. An optional
 	# @<branch> clones a non-default branch (used to ship in-review
 	# plugin work in a feature-branch test build).
 	cd "$clone_dir/plugins"
@@ -149,7 +149,6 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-practice
 		got-feedback/feedback-plugin-sectionmap
 		got-feedback/feedback-plugin-setlist
-		got-feedback/feedback-plugin-slopscale-fork
 		got-feedback/feedback-plugin-song-preview
 		got-feedback/feedback-plugin-splitscreen
 		got-feedback/feedback-plugin-staffview
@@ -163,6 +162,7 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-transpose-chords
 		got-feedback/feedback-plugin-tutorials
 		got-feedback/feedback-plugin-update-manager
+		got-feedback/feedback-plugin-virtuoso
 		# Rig Builder (NAM tone builder) — repo is not under the feedback-plugin-* prefix.
 		got-feedback/rig_builder
 	)
