@@ -325,7 +325,8 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             const inputs = Array.isArray(typeInfo && typeInfo.inputs) ? typeInfo.inputs : [];
             inputs.forEach((deviceName, index) => {
                 const logicalSourceKey = `desktop-audio:${safeKeyPart(typeName)}:input:${index}`;
-                const realName = (typeof deviceName === 'string' && deviceName.trim())
+                const hasRealName = (typeof deviceName === 'string' && !!deviceName.trim());
+                const realName = hasRealName
                     ? deviceName.trim()
                     : `Desktop input ${index + 1}`;
                 audioSession.registerInputSource({
@@ -334,8 +335,20 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
                     providerId: 'audio_engine',
                     ownerPluginId: 'audio_engine',
                     kind: 'instrument',
-                    labelPseudonym: realName,
-                    labelSafe: true,
+                    // Real OS device names go in `label`, which the audio-session
+                    // sanitizer (_safeInputLabel) can redact for diagnostics /
+                    // suspicious names. `labelPseudonym` is for already-safe
+                    // pseudonyms and is returned UN-redacted, so putting a real
+                    // name there would bypass redaction and leak PII (e.g.
+                    // "Byron's AirPods"). Only the generic fallback is labelSafe.
+                    label: realName,
+                    labelSafe: !hasRealName,
+                    // Safe per-index fallback used when the audio-session
+                    // sanitizer redacts a suspicious real name (e.g. one
+                    // containing "Device" or 4+ digits), so redacted inputs stay
+                    // distinguishable instead of collapsing to one generic label.
+                    pseudonym: `Desktop input ${index + 1}`,
+                    diagnosticsPseudonym: `Desktop input ${index + 1}`,
                     availability: 'available',
                     sourceMode: 'native',
                     channelSummary: { channelCount: 2, channelShape: 'stereo', supports: ['mono', 'stereo'] },
