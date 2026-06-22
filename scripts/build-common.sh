@@ -149,7 +149,7 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-practice
 		got-feedback/feedback-plugin-sectionmap
 		got-feedback/feedback-plugin-setlist
-		got-feedback/feedback-plugin-slopscale-fork
+		got-feedback/feedback-plugin-virtuoso
 		got-feedback/feedback-plugin-song-preview
 		got-feedback/feedback-plugin-splitscreen
 		got-feedback/feedback-plugin-staffview
