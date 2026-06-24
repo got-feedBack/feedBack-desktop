@@ -32,6 +32,7 @@ set(AUDIO_SOURCES
 # nullptr and the caller falls back to in-process loading.
 set(SANDBOX_SOURCES
     Sandbox/SandboxedProcessor.cpp
+    Sandbox/CrashAttribution.cpp
     Sandbox/ControlChannel_shared.cpp
     Sandbox/AudioChannel_shared.cpp
     Sandbox/SandboxFactory_shared.cpp

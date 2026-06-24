@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import { isDebugEnabled, getDebugLogPath } from './debug-log';
-import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel } from './vst-crash-guard';
+import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
@@ -285,6 +285,12 @@ export function initAudioBridge(): void {
                 audio.setCrashedPlugins(blocked);
             if (blocked.length)
                 console.log(`[audio] ${blocked.length} VST(s) on the crash blocklist — will load sandboxed`);
+            // Arm the native last-chance attributor so a fatal in-process VST3
+            // fault outside the load/editor sentinel windows (e.g. a plugin
+            // WndProc on WM_ACTIVATEAPP) still stamps the sentinel and gets
+            // sandboxed next launch. No-op on non-Windows. See issue #35.
+            if (typeof audio.setVstCrashSentinelPath === 'function')
+                audio.setVstCrashSentinelPath(getSentinelPath());
         } catch (e: any) {
             console.warn(`[audio] VST crash guard init failed: ${e.message}`);
         }
