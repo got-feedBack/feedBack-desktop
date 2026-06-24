@@ -75,6 +75,14 @@ export function initVstCrashGuard(): string[] {
     return [...blocklist];
 }
 
+// Absolute path to the sentinel file, for handing to the native crash
+// attributor (NodeAddon setVstCrashSentinelPath) so a fatal in-process VST3
+// fault can stamp the same sentinel this module promotes on next launch. Empty
+// until initVstCrashGuard() has run.
+export function getSentinelPath(): string {
+    return sentinelPath;
+}
+
 function persist(): void {
     try {
         fs.writeFileSync(blocklistPath, JSON.stringify([...blocklist], null, 2));

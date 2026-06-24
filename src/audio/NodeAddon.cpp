@@ -26,6 +26,7 @@ static void cancelAllPendingLoads();
 #include "NAMProcessor.h"
 #include "IRLoader.h"
 #include "Sandbox/SandboxedProcessor.h"
+#include "Sandbox/CrashAttribution.h"
 
 #include <juce_events/juce_events.h>
 
@@ -256,6 +257,10 @@ static void doShutdown()
     }
 
     stopJuceMessageThread();
+
+    // Restore the previous top-level exception filter — the addon (and thus our
+    // unhandledFilter's code) may be unloaded, so it must not stay installed.
+    slopsmith::sandbox::uninstallVstCrashAttribution();
 }
 
 static Napi::Value Shutdown(const Napi::CallbackInfo& info)
@@ -1812,6 +1817,21 @@ static Napi::Value SetCrashedPlugins(const Napi::CallbackInfo& info)
     return env.Undefined();
 }
 
+// Arm the native last-chance crash attributor with the path to the crash-guard
+// sentinel file (src/main/vst-crash-guard.ts owns it). A fatal in-process fault
+// inside a loaded .vst3 then stamps the sentinel before the process dies, so the
+// next launch sandboxes the offender — covering crashes that arrive outside the
+// JS load/editor sentinel windows (e.g. a plugin WndProc on WM_ACTIVATEAPP).
+// No-op on non-Windows. See issue #35.
+static Napi::Value SetVstCrashSentinelPath(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    if (info.Length() > 0 && info[0].IsString())
+        slopsmith::sandbox::installVstCrashAttribution(
+            juce::String(info[0].As<Napi::String>().Utf8Value()));
+    return env.Undefined();
+}
+
 // ── Signal Chain Management ──────────────────────────────────────────────────
 
 // Pending in-process loads: each LoadVSTWorker / LoadPresetWorker that's
@@ -3155,6 +3175,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("savePluginList", Napi::Function::New(env, SavePluginList));
     exports.Set("loadPluginList", Napi::Function::New(env, LoadPluginList));
     exports.Set("setCrashedPlugins", Napi::Function::New(env, SetCrashedPlugins));
+    exports.Set("setVstCrashSentinelPath", Napi::Function::New(env, SetVstCrashSentinelPath));
 
     // Signal chain
     exports.Set("loadVST", Napi::Function::New(env, LoadVST));
