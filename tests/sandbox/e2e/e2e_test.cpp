@@ -31,9 +31,50 @@ static bool allClose(const juce::AudioBuffer<float>& b, float v)
     return true;
 }
 
+// Pure routing checks for shouldSandbox() — no spawn / fixture needed. Guards
+// the pre-seed policy: under in-process-by-default, a PolyChrome plugin (whose
+// in-process WndProc DEP-faults via the OS message pump — uncatchable by the
+// SignalChain guard) MUST be forced to the out-of-process sandbox, while an
+// ordinary scanned-clean VST3 stays in-process. See dmp a06f48e1 / McRocklin.
+static void testShouldSandboxRouting()
+{
+    std::printf("--- shouldSandbox routing ---\n");
+    auto desc = [](const char* p)
+    {
+        juce::PluginDescription d;
+        d.fileOrIdentifier = juce::String::fromUTF8(p);
+        return d;
+    };
+    // PolyChrome DSP vendor folder → sandbox. McRocklin Suite is NOT in the
+    // filename pre-seed, so these can only pass via the new vendor/path match —
+    // they directly guard the fix on both Windows- and POSIX-style paths.
+    CHECK(shouldSandbox(desc("C:\\Program Files\\Common Files\\VST3\\PolyChrome DSP\\McRocklin Suite.vst3")));
+    CHECK(shouldSandbox(desc("/Library/Audio/Plug-Ins/VST3/PolyChrome DSP/McRocklin Suite.vst3")));
+    // Filename pre-seed still independently routes Graphene by name.
+    CHECK(shouldSandbox(desc("/plugins/Graphene.vst3")));
+    // Ordinary scanned-clean VST3 stays in-process.
+    CHECK(! shouldSandbox(desc("/Library/Audio/Plug-Ins/VST3/SomeCleanAmp.vst3")));
+    // Specificity: the fragment is the vendor FOLDER, not a bare brand word — a
+    // clean plugin under a path that merely contains 'polychrome' (e.g. a
+    // username) must NOT be force-sandboxed (no in-process fallback exists, so a
+    // false positive could hard-fail the load).
+    CHECK(! shouldSandbox(desc("/Users/polychrome/VST3/SomeCleanAmp.vst3")));
+    // Non-VST3 (NAM/IR) always in-process.
+    CHECK(! shouldSandbox(desc("/models/AwesomeAmp.nam")));
+}
+
 int main(int argc, char** argv)
 {
-    if (argc < 3) { std::fprintf(stderr, "usage: e2e_test <vst-host> <plugin.vst3>\n"); return 2; }
+    testShouldSandboxRouting();
+
+    // Surface routing failures even on the no-args path: the pure routing checks
+    // above need no fixture, so a regression must not be masked by the usage
+    // sentinel (return 1 if a routing CHECK failed, else the usage code 2).
+    if (argc < 3)
+    {
+        std::fprintf(stderr, "usage: e2e_test <vst-host> <plugin.vst3>\n");
+        return g_fail == 0 ? 2 : 1;
+    }
 
     SandboxedProcessor::SpawnConfig cfg;
     cfg.pluginPath     = juce::String::fromUTF8(argv[2]);
