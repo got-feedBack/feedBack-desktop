@@ -22,19 +22,37 @@ std::atomic<bool> g_installed{ false };
 // Re-entrancy guard: if the sentinel write itself faulted we must not recurse.
 std::atomic<bool> g_writing{ false };
 
-bool endsWithVst3IgnoreCase(const wchar_t* p, size_t len) noexcept
+// Resolve a loaded-module path to its enclosing `.vst3` BUNDLE path, IN PLACE,
+// so it matches the blocklist key (shouldSandbox/setCrashedPlugins key on
+// desc.fileOrIdentifier = the bundle directory). A Windows VST3 bundle is loaded
+// via its inner DLL (`Foo.vst3\Contents\x86_64-win\Foo.vst3`), so
+// GetModuleFileNameW returns that inner path; truncate at the first `.vst3`
+// path-component boundary to recover `…\Foo.vst3`. A single-file `.vst3` already
+// ends there and is left unchanged. Returns false (→ not a VST3 → skip) when no
+// `.vst3` component is present. Case-insensitive (ASCII), allocation-free.
+bool truncateToVst3Bundle(wchar_t* p) noexcept
 {
     static const wchar_t ext[] = L".vst3";
-    constexpr size_t el = 5; // wcslen(L".vst3")
-    if (len < el) return false;
-    const wchar_t* s = p + (len - el);
-    for (size_t i = 0; i < el; ++i)
+    for (size_t i = 0; p[i] != L'\0'; ++i)
     {
-        wchar_t a = s[i];
-        if (a >= L'A' && a <= L'Z') a = static_cast<wchar_t>(a + 32);
-        if (a != ext[i]) return false;
+        size_t k = 0;
+        for (; k < 5; ++k)
+        {
+            wchar_t a = p[i + k];
+            if (a >= L'A' && a <= L'Z') a = static_cast<wchar_t>(a + 32);
+            if (a != ext[k]) break;
+        }
+        if (k == 5)
+        {
+            const wchar_t after = p[i + 5];
+            if (after == L'\0' || after == L'\\' || after == L'/')
+            {
+                p[i + 5] = L'\0'; // keep "…\Foo.vst3", drop any \Contents\… tail
+                return true;
+            }
+        }
     }
-    return true;
+    return false;
 }
 
 // Allocation-free write of {"plugin":"<json-escaped>","op":"native-crash"} —
@@ -81,8 +99,7 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* info) noexcept
     // reaches here — no false attribution and no per-exception I/O.
     if (g_installed.load(std::memory_order_acquire)
         && g_sentinelPathW[0] != L'\0'
-        && info != nullptr && info->ExceptionRecord != nullptr
-        && !g_writing.exchange(true, std::memory_order_acq_rel))
+        && info != nullptr && info->ExceptionRecord != nullptr)
     {
         const DWORD code = info->ExceptionRecord->ExceptionCode;
         const bool fatalFault =
@@ -94,7 +111,11 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* info) noexcept
         if (fatalFault)
         {
             // Map the faulting instruction to its owning module. If that module
-            // is a loaded .vst3, the fault is the plugin's — record it.
+            // is a loaded .vst3, the fault is (heuristically — by faulting
+            // address, with no host-frame corroboration) the plugin's, so
+            // record it. A corrupted control transfer INTO plugin code can
+            // mis-attribute; the cost is a good plugin forced to the sandbox,
+            // never a crash, so the heuristic is acceptable here.
             HMODULE mod = nullptr;
             if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
                                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -106,12 +127,17 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* info) noexcept
                 wchar_t pathW[1024];
                 const DWORD cap = static_cast<DWORD>(sizeof(pathW) / sizeof(pathW[0]));
                 const DWORD len = GetModuleFileNameW(mod, pathW, cap);
-                if (len != 0 && len < cap && endsWithVst3IgnoreCase(pathW, len))
+                // Gate the one-shot on a CONFIRMED VST3 fault, not on merely
+                // reaching the filter: a non-VST3 unhandled exception (or a
+                // concurrent benign one) must not burn the latch and disable
+                // attribution for the real plugin fault. The exchange also
+                // serialises two threads faulting in plugins at once + guards
+                // against a fault inside writeSentinel re-entering.
+                if (len != 0 && len < cap && truncateToVst3Bundle(pathW)
+                    && !g_writing.exchange(true, std::memory_order_acq_rel))
                     writeSentinel(pathW);
             }
         }
-        // Leave g_writing set: a single attribution per process lifetime is all
-        // we need, and not clearing it hardens against a fault inside the write.
     }
 
     // Never handle — defer to the previously installed top-level filter
@@ -143,9 +169,11 @@ void installVstCrashAttribution(const juce::String& sentinelPath)
 
 void uninstallVstCrashAttribution()
 {
+    // Clearing g_installed (acquire-load gated in the filter) is what disarms
+    // the write path; we deliberately do NOT mutate g_sentinelPathW here so a
+    // fault racing this teardown can't read a half-zeroed path.
     if (g_installed.exchange(false, std::memory_order_acq_rel))
         SetUnhandledExceptionFilter(g_prevFilter);
-    g_sentinelPathW[0] = L'\0';
 }
 
 } // namespace slopsmith::sandbox
