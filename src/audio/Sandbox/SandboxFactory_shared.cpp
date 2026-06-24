@@ -17,17 +17,35 @@ namespace slopsmith::sandbox {
 
 namespace {
 
-// Historical pre-seed of plugins known to fail in-process. With the
-// sandbox-by-default policy in shouldSandbox() below, every VST3 routes to the
-// sandbox regardless of this list, so it no longer determines routing on its
-// own. It survives as (a) documentation of *why* each plugin originally needed
-// the sandbox, (b) diagnostic tagging in shouldSandbox's VST_TRACE output, and
-// (c) forward-looking infrastructure for a future per-plugin opt-out.
+// Pre-seed of plugins known to fail when hosted in-process. Under the current
+// in-process-by-default policy (see shouldSandbox() below) this list DOES drive
+// routing: a filename matched here is forced to the out-of-process sandbox
+// instead of loading in-process. Matched against the plugin's basename
+// (case-insensitive prefix).
 const juce::StringArray kDefaultNeedsSandboxFilenames = {
     "Guitar Rig",
     "Graphene",
     "TONEX",
     "AmpliTube",
+};
+
+// Vendor/path fragments that force the sandbox regardless of filename — matched
+// (case-insensitive) against the full plugin path. Use this for a whole vendor
+// whose plugins share an install folder rather than enumerating every product.
+//
+// PolyChrome DSP (McRocklin Suite, Graphene, …) creates a top-level window on
+// the host message thread during in-process init. On Electron's BACKGROUND JUCE
+// message thread that window's WndProc ends up in non-executable memory, so when
+// Windows broadcasts WM_ACTIVATEAPP the OS message pump executes it → an
+// execute-DEP access violation (0xC0000005) that kills the app. That crash
+// arrives via USER32→WndProc with NO host frame on the stack, so the SignalChain
+// fault guard cannot catch it and the runtime blocklist never gets to record it.
+// The sandbox child hosts the plugin on a real top-level message thread, which
+// both isolates the fault and is the environment the plugin actually needs.
+// (Diagnosed from crash dump a06f48e1: Rax==Rip==McRocklin Suite.vst3 WndProc,
+// caller USER32+0xEF5C, msg=WM_ACTIVATEAPP.)
+const juce::StringArray kDefaultNeedsSandboxPathFragments = {
+    "PolyChrome",
 };
 
 // Runtime crash blocklist: full plugin paths that crashed the app on a previous
@@ -77,6 +95,20 @@ bool shouldSandbox(const juce::PluginDescription& desc)
         {
             VST_TRACE("shouldSandbox: %s — filename starts with '%s'",
                       desc.fileOrIdentifier.toRawUTF8(), needle.toRawUTF8());
+            return true;
+        }
+    }
+
+    // Vendor/path pre-seed: force whole vendors known to fail in-process (e.g.
+    // PolyChrome DSP — see kDefaultNeedsSandboxPathFragments) to the sandbox,
+    // even if their individual filenames aren't enumerated above.
+    const auto fullPath = path.getFullPathName();
+    for (auto& fragment : kDefaultNeedsSandboxPathFragments)
+    {
+        if (fullPath.containsIgnoreCase(fragment))
+        {
+            VST_TRACE("shouldSandbox: %s — path contains '%s' (vendor needs sandbox)",
+                      desc.fileOrIdentifier.toRawUTF8(), fragment.toRawUTF8());
             return true;
         }
     }
