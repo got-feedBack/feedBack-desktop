@@ -30,8 +30,14 @@ const juce::StringArray kDefaultNeedsSandboxFilenames = {
 };
 
 // Vendor/path fragments that force the sandbox regardless of filename — matched
-// (case-insensitive) against the full plugin path. Use this for a whole vendor
-// whose plugins share an install folder rather than enumerating every product.
+// (case-insensitive substring) against the full plugin path. Use this for a
+// whole vendor whose plugins share an install folder rather than enumerating
+// every product. Prefer the most specific reliable fragment (the vendor's
+// install-folder name, not a bare brand word): there is NO in-process fallback
+// here — loadVstSandboxAware hard-fails the load if a force-sandboxed plugin
+// can't spawn the sandbox child — so a false-positive match on an unrelated
+// path would turn a fine in-process plugin into a load failure on a machine
+// with a broken sandbox host.
 //
 // PolyChrome DSP (McRocklin Suite, Graphene, …) creates a top-level window on
 // the host message thread during in-process init. On Electron's BACKGROUND JUCE
@@ -43,9 +49,10 @@ const juce::StringArray kDefaultNeedsSandboxFilenames = {
 // The sandbox child hosts the plugin on a real top-level message thread, which
 // both isolates the fault and is the environment the plugin actually needs.
 // (Diagnosed from crash dump a06f48e1: Rax==Rip==McRocklin Suite.vst3 WndProc,
-// caller USER32+0xEF5C, msg=WM_ACTIVATEAPP.)
+// caller USER32+0xEF5C, msg=WM_ACTIVATEAPP. The vendor ships to
+// Common Files/VST3/PolyChrome DSP/, so that folder name is the reliable match.)
 const juce::StringArray kDefaultNeedsSandboxPathFragments = {
-    "PolyChrome",
+    "PolyChrome DSP",
 };
 
 // Runtime crash blocklist: full plugin paths that crashed the app on a previous
@@ -74,12 +81,14 @@ bool shouldSandbox(const juce::PluginDescription& desc)
     if (!path.getFileName().endsWithIgnoreCase(".vst3"))
         return false;
 
+    // Canonical path, computed once and reused by the blocklist + vendor checks.
+    const auto fullPath = path.getFullPathName();
+
     // Runtime crash blocklist: a plugin that previously faulted in-process is
     // forced back to the out-of-process sandbox on every subsequent load.
     {
         const std::lock_guard<std::mutex> lock(g_crashedPluginsMutex);
-        const auto canonical = path.getFullPathName();
-        if (g_crashedPlugins.contains(canonical, /*ignoreCase*/ true))
+        if (g_crashedPlugins.contains(fullPath, /*ignoreCase*/ true))
         {
             VST_TRACE("shouldSandbox: %s — on the runtime crash blocklist",
                       desc.fileOrIdentifier.toRawUTF8());
@@ -102,7 +111,6 @@ bool shouldSandbox(const juce::PluginDescription& desc)
     // Vendor/path pre-seed: force whole vendors known to fail in-process (e.g.
     // PolyChrome DSP — see kDefaultNeedsSandboxPathFragments) to the sandbox,
     // even if their individual filenames aren't enumerated above.
-    const auto fullPath = path.getFullPathName();
     for (auto& fragment : kDefaultNeedsSandboxPathFragments)
     {
         if (fullPath.containsIgnoreCase(fragment))
