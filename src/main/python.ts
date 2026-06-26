@@ -911,4 +911,4 @@ export function restartPython(): void {
     setTimeout(() => startPython(), 1000);
 }
 
-export { getPluginsDir, getConfigDir };
+export { getPluginsDir, getConfigDir, getDLCDir };

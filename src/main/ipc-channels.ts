@@ -19,6 +19,14 @@ export const IPC_UPDATE_APPLY = 'update:apply' as const;
 export const IPC_UPDATE_EVENT_AVAILABLE = 'update:available' as const;
 export const IPC_UPDATE_EVENT_DOWNLOADED = 'update:downloaded' as const;
 
+// Config maintenance — the in-app "Reset / repair configuration" action. The
+// Settings panel reads the enumerated per-OS paths, runs a granular reset, and
+// asks the main process to relaunch. Replaces the manual "delete the config
+// folder" instruction.
+export const IPC_MAINTENANCE_GET_PATHS = 'maintenance:getPaths' as const;
+export const IPC_MAINTENANCE_RESET = 'maintenance:reset' as const;
+export const IPC_MAINTENANCE_RESTART = 'maintenance:restart' as const;
+
 // Screen wake lock. The renderer (slopsmith core app.js) asks the main process
 // to keep the display awake while a song plays — embedded Chromium does not
 // honour the renderer's navigator.wakeLock reliably, so we drive Electron's

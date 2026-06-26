@@ -1473,6 +1473,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         setupAudioQualityControls();
         setupToneAutomationSettingsEvents();
         setupUpdateChannelControls();
+        setupMaintenanceControls();
     }
 
     // ── Updater (Velopack) settings UI ────────────────────────────────────────
@@ -1642,6 +1643,110 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         hookState.updateCheckOnClick = onCheckClick;
 
         renderStatus();
+    }
+
+    // ── Reset / repair configuration (Maintenance) ────────────────────────────
+    // Replaces the old "delete the config folder before upgrading" instruction.
+    // Talks to the main process via window.slopsmithDesktop.maintenance, which
+    // enumerates the correct per-OS paths and performs the delete. Binds fresh on
+    // each settings render (the panel is injected via innerHTML, recreating the
+    // DOM), mirroring setupAudioQualityControls. Degrades gracefully when the
+    // maintenance IPC namespace is absent (browser / older build).
+    function setupMaintenanceControls() {
+        const api = window.slopsmithDesktop?.maintenance;
+        const section = document.getElementById('maint-section');
+        if (!section) return;
+
+        const resetAppBtn = document.getElementById('maint-reset-app');
+        const resetPluginsBtn = document.getElementById('maint-reset-plugins');
+        const resetFullBtn = document.getElementById('maint-reset-full');
+        const optPlugins = document.getElementById('maint-opt-plugins');
+        const optLibrary = document.getElementById('maint-opt-library');
+        const optMl = document.getElementById('maint-opt-ml');
+        const configDirEl = document.getElementById('maint-config-dir');
+        const sharedWarn = document.getElementById('maint-shared-warning');
+        const libraryPathEl = document.getElementById('maint-library-path');
+        const statusEl = document.getElementById('maint-status');
+        const restartBtn = document.getElementById('maint-restart');
+
+        const actionButtons = [resetAppBtn, resetPluginsBtn, resetFullBtn].filter(Boolean);
+
+        if (!api) {
+            if (configDirEl) configDirEl.textContent = 'Configuration reset is only available in the desktop app.';
+            actionButtons.forEach((b) => { b.disabled = true; });
+            return;
+        }
+
+        function setStatus(text, kind) {
+            if (!statusEl) return;
+            statusEl.textContent = text;
+            statusEl.classList.remove('hidden', 'text-slate-400', 'text-emerald-400', 'text-amber-300', 'text-red-400');
+            const cls = kind === 'error' ? 'text-red-400'
+                : kind === 'success' ? 'text-emerald-400'
+                    : kind === 'warn' ? 'text-amber-300' : 'text-slate-400';
+            statusEl.classList.add(cls);
+        }
+
+        // Show the resolved CONFIG_DIR + library path + shared-Docker warning.
+        (async () => {
+            try {
+                const info = await api.getPaths();
+                if (configDirEl) configDirEl.textContent = `Active config: ${info.configDir}`;
+                if (libraryPathEl && info.dlcDir) libraryPathEl.textContent = `(${info.dlcDir})`;
+                if (sharedWarn && info.sharedDockerConfig) {
+                    sharedWarn.textContent = 'Heads up: this config is shared with a Docker Slopsmith install — a full reset affects both.';
+                    sharedWarn.classList.remove('hidden');
+                }
+            } catch (e) {
+                console.warn('[maintenance] getPaths failed:', e);
+            }
+        })();
+
+        // The authoritative confirmation is a NATIVE main-process dialog raised by
+        // the maintenance:reset handler — that's the real gate (this bridge is
+        // reachable by plugin scripts, so a renderer-only confirm isn't enough).
+        // We just kick the request; a canceled summary comes back if the user
+        // dismisses the native prompt.
+        async function doReset(selection) {
+            actionButtons.forEach((b) => { b.disabled = true; });
+            setStatus('Awaiting confirmation…', 'warn');
+            if (restartBtn) restartBtn.classList.add('hidden');
+            try {
+                const summary = await api.reset(selection);
+                if (summary?.canceled) {
+                    setStatus('Reset canceled.', 'default');
+                    return;
+                }
+                const removed = summary.deleted.filter((d) => d.existed && d.ok).length;
+                const failed = summary.deleted.filter((d) => !d.ok);
+                if (failed.length) {
+                    console.warn('[maintenance] some paths could not be deleted:', failed);
+                    setStatus(`Removed ${removed} item(s); ${failed.length} could not be deleted (see console). Restart to finish.`, 'warn');
+                } else {
+                    setStatus(`Removed ${removed} item(s). Restart to finish.`, 'success');
+                }
+                if (restartBtn) restartBtn.classList.remove('hidden');
+            } catch (e) {
+                console.warn('[maintenance] reset failed:', e);
+                setStatus(`Reset failed: ${e?.message || e}`, 'error');
+            } finally {
+                actionButtons.forEach((b) => { b.disabled = false; });
+            }
+        }
+
+        resetAppBtn?.addEventListener('click', () => doReset({ appSettings: true }));
+        resetPluginsBtn?.addEventListener('click', () => doReset({ pluginState: true }));
+        resetFullBtn?.addEventListener('click', () => doReset({
+            fullReset: true,
+            alsoInstalledPlugins: !!optPlugins?.checked,
+            alsoSongLibrary: !!optLibrary?.checked,
+            alsoMlCaches: !!optMl?.checked,
+        }));
+
+        restartBtn?.addEventListener('click', () => {
+            setStatus('Restarting…', 'warn');
+            try { void api.restart(); } catch (e) { console.warn('[maintenance] restart failed:', e); }
+        });
     }
 
     // ── Audio Quality (soundfont) ─────────────────────────────────────────────

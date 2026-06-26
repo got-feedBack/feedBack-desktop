@@ -60,6 +60,39 @@ import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, pow
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
+import { migrateUserDataIfNeeded, consumePendingResetIfNeeded } from './config-bootstrap';
+
+// Pin the userData folder name on every OS. Before this it was derived from the
+// build name and differed per-OS ('fee[dB]ack' on macOS, 'slopsmith-desktop' on
+// Linux/Windows), so a single "delete the config folder" instruction could never
+// be right everywhere. setName() must run before ANY app.getPath()/crashReporter/
+// whenReady so the deterministic path (<appData>/feedback-desktop) is used
+// throughout. It does NOT change the user-facing brand (productName 'fee[dB]ack');
+// with the name pinned, the path-hostile brackets never reach the filesystem.
+app.setName('feedback-desktop');
+
+// One-time copy of an existing legacy userData folder into the new one, so
+// testers don't start fresh after the rename. MUST run before BOTH crashReporter
+// (which creates <userData>/Crashpad) AND requestSingleInstanceLock() (which
+// writes a SingletonLock into userData) — the migration gate is "new userData
+// doesn't exist yet", so anything that creates it first would silently skip the
+// migration and start the upgraded user fresh.
+migrateUserDataIfNeeded();
+
+// Acquire the single-instance lock now so the primary-only deferred-reset cleanup
+// runs ONLY in the instance that will actually boot: a losing second instance
+// must not consume the pending-reset manifest while the primary still holds
+// Chromium / Crashpad files open. requestSingleInstanceLock() must be called
+// exactly once; the lock branch at the bottom of this file reuses this result.
+// SLOPSMITH_ALLOW_MULTIPLE=1 opts out (two builds side-by-side).
+const allowMultipleInstances = process.env.SLOPSMITH_ALLOW_MULTIPLE === '1';
+const hasSingleInstanceLock = allowMultipleInstances || app.requestSingleInstanceLock();
+if (hasSingleInstanceLock) {
+    // Apply any reset deletions deferred from a previous "Reset configuration"
+    // run, before crashReporter / any BrowserWindow reopens Chromium state &
+    // Crashpad, so those held-open paths can actually be removed.
+    consumePendingResetIfNeeded();
+}
 
 // Enable Electron's Crashpad to capture native crashes (incl. VST/JUCE C++
 // access violations) into <userData>/Crashpad/reports/ as .dmp files. Must
@@ -72,7 +105,9 @@ crashReporter.start({
     uploadToServer: false,
     compress: false,
 });
-import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, getLanUrls } from './python';
+import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, getLanUrls, getConfigDir } from './python';
+import { runConfigMigrations } from './config-migrations';
+import { registerMaintenanceHandlers } from './config-reset';
 import {
     IPC_STARTUP_STATUS,
     IPC_STARTUP_GET_STATUS,
@@ -907,6 +942,25 @@ async function startup(): Promise<void> {
     createSplashWindow();
     publishStartupStatus({ message: 'Starting backend service...', phase: 'booting', running: true });
 
+    // Run config-schema migrations against the active backend CONFIG_DIR before
+    // the backend starts. This replaces "delete the config folder before
+    // upgrading" with targeted, idempotent, fail-soft migrations. Logging the
+    // resolved CONFIG_DIR here also closes the visibility gap around the silent
+    // Linux ~/.local/share/slopsmith shared-config override (python.ts getConfigDir).
+    try {
+        const activeConfigDir = getConfigDir();
+        console.log(`[main] Active CONFIG_DIR: ${activeConfigDir}`);
+        runConfigMigrations(activeConfigDir, app.getVersion(), new Date().toISOString());
+    } catch (err) {
+        console.warn('[main] config migrations failed (continuing):', err);
+    }
+
+    // Register the "Reset / repair configuration" IPC handlers (Settings panel).
+    // Pass the window getter so the destructive-reset confirmation is a native,
+    // main-process modal (the renderer bridge is reachable by plugin scripts, so
+    // a renderer-only confirm is not a sufficient gate).
+    registerMaintenanceHandlers(() => mainWindow);
+
     // Start Python server (Slopsmith backend)
     startPython();
 
@@ -1076,9 +1130,11 @@ async function startup(): Promise<void> {
 // another instance already owns it, surface that window (via 'second-instance'
 // on the primary) and quit THIS one before startup() boots a competing backend
 // or window. `SLOPSMITH_ALLOW_MULTIPLE=1` opts out so two builds can run
-// side-by-side (e.g. A/B testing different versions).
-const allowMultipleInstances = process.env.SLOPSMITH_ALLOW_MULTIPLE === '1';
-if (!allowMultipleInstances && !app.requestSingleInstanceLock()) {
+// side-by-side (e.g. A/B testing different versions). The lock was already
+// acquired at the top of this file (hasSingleInstanceLock) so primary-only reset
+// side effects could run before crashReporter — reuse that result here rather
+// than calling requestSingleInstanceLock() a second time.
+if (!hasSingleInstanceLock) {
     app.quit();
 } else {
     if (!allowMultipleInstances) {

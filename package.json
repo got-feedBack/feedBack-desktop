@@ -10,6 +10,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"tests/*.test.js\"",
     "build:ts": "tsc && node -e \"const fs=require('fs'),path=require('path');fs.copyFileSync('src/main/splash.html','dist/main/splash.html');fs.copyFileSync('src/main/spinner.json','dist/main/spinner.json');fs.copyFileSync('node_modules/lottie-web/build/player/lottie.min.js','dist/main/lottie.min.js');const dst='dist/main/images';if(fs.existsSync(dst))fs.rmSync(dst,{recursive:true});fs.mkdirSync(dst,{recursive:true});fs.readdirSync('src/main/images',{withFileTypes:true}).filter(d=>d.isFile()&&d.name.endsWith('.webp')).forEach(d=>fs.copyFileSync(path.join('src/main/images',d.name),path.join(dst,d.name)))\"",
     "build:audio": "bash scripts/build-audio.sh Release",
     "build:audio:debug": "bash scripts/build-audio.sh Debug",
@@ -32,6 +33,9 @@
     "appId": "com.byron.slopsmith-desktop",
     "productName": "fee[dB]ack",
     "executableName": "feedback",
+    "extraMetadata": {
+      "name": "feedback-desktop"
+    },
     "artifactName": "feedback-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"

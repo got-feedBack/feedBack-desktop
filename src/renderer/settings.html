@@ -107,4 +107,58 @@
             <div id="ae-ta-targets" class="space-y-1.5"></div>
         </div>
     </div>
+    <div id="maint-section" class="border border-slate-700 rounded-lg p-3 bg-slate-800/30">
+        <div class="text-xs font-semibold text-slate-300 mb-2">Reset / repair configuration</div>
+        <p class="text-xs text-slate-500 mb-2">
+            Fixes a broken or stale configuration after an upgrade — you no longer need to delete any folders by hand.
+            Your song library and installed plugins are kept unless you explicitly opt in under Full reset.
+        </p>
+        <p id="maint-config-dir" class="text-xs text-slate-500 mb-1 break-all"></p>
+        <p id="maint-shared-warning" class="hidden text-xs text-amber-300 mb-2"></p>
+
+        <div class="space-y-2">
+            <div class="flex items-start justify-between gap-3">
+                <div>
+                    <div class="text-sm text-slate-200">Reset app settings &amp; caches</div>
+                    <div class="text-xs text-slate-500">Audio device settings, soundfont state, window/UI prefs and Electron caches. Safe — rebuilt on next launch.</div>
+                </div>
+                <button id="maint-reset-app" class="shrink-0 px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Reset</button>
+            </div>
+
+            <div class="flex items-start justify-between gap-3">
+                <div>
+                    <div class="text-sm text-slate-200">Clear plugin state &amp; cached Python deps</div>
+                    <div class="text-xs text-slate-500">Enabled/disabled state, plugin data, and plugin-installed Python packages. Does not remove installed plugins.</div>
+                </div>
+                <button id="maint-reset-plugins" class="shrink-0 px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Clear</button>
+            </div>
+
+            <div class="border-t border-slate-700 pt-2">
+                <div class="text-sm text-rose-300">Full reset</div>
+                <div class="text-xs text-slate-500 mb-2">
+                    Everything above plus the backend databases and config. By default your song library and installed
+                    plugins are preserved — opt in below only if you really want to delete them.
+                </div>
+                <div class="space-y-1 mb-2">
+                    <label class="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                        <input type="checkbox" id="maint-opt-plugins" class="mt-0.5 accent-rose-500">
+                        <span>Also remove installed plugins</span>
+                    </label>
+                    <label class="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                        <input type="checkbox" id="maint-opt-library" class="mt-0.5 accent-rose-500">
+                        <span>Also delete the song library <span id="maint-library-path" class="text-slate-500 break-all"></span></span>
+                    </label>
+                    <label class="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                        <input type="checkbox" id="maint-opt-ml" class="mt-0.5 accent-rose-500">
+                        <span>Also clear ML model caches (torch / huggingface)</span>
+                    </label>
+                </div>
+                <button id="maint-reset-full" class="px-3 py-1.5 rounded bg-rose-700 hover:bg-rose-600 text-sm">Full reset…</button>
+            </div>
+        </div>
+
+        <p class="text-xs text-slate-500 mt-2">You'll be asked to confirm in a system dialog before anything is deleted.</p>
+        <p id="maint-status" class="hidden text-xs mt-3"></p>
+        <button id="maint-restart" class="hidden mt-2 px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-sm font-medium">Restart now</button>
+    </div>
 </div>

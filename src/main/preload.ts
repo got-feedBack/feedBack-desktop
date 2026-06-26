@@ -4,6 +4,21 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 import type { StartupStatus } from './python';
+// Type-only imports (erased at compile) — no runtime require, so the preload
+// bundle never drags in config-reset's electron/python/fs dependencies.
+import type { ResetSelection, ResetSummary } from './config-reset';
+import type { ConfigPathCategories } from './config-paths';
+
+// Shape returned by maintenance.getPaths() — the enumerated per-OS categories
+// plus the resolved active CONFIG_DIR and a flag for the shared Docker dir.
+export interface MaintenancePaths {
+    configDir: string;
+    userData: string;
+    dlcDir: string;
+    pluginsDir: string;
+    sharedDockerConfig: boolean;
+    categories: ConfigPathCategories;
+}
 import {
     IPC_STARTUP_STATUS,
     IPC_STARTUP_GET_STATUS,
@@ -15,6 +30,9 @@ import {
     IPC_UPDATE_EVENT_AVAILABLE,
     IPC_UPDATE_EVENT_DOWNLOADED,
     IPC_POWER_SET_SCREEN_AWAKE,
+    IPC_MAINTENANCE_GET_PATHS,
+    IPC_MAINTENANCE_RESET,
+    IPC_MAINTENANCE_RESTART,
 } from './ipc-channels';
 
 // Auto-update channel + event payloads. Kept here (rather than re-exported
@@ -449,6 +467,17 @@ const slopsmithDesktopApi = {
             ipcRenderer.invoke('network:getLanAccess'),
         setLanAccess: (enabled: boolean): Promise<{ success: boolean; enabled: boolean; urls: string[] }> =>
             ipcRenderer.invoke('network:setLanAccess', enabled),
+    },
+
+    // Config maintenance — "Reset / repair configuration" (Settings panel).
+    // getPaths returns the per-OS enumerated categories + the resolved CONFIG_DIR
+    // (incl. a sharedDockerConfig flag); reset runs a granular delete; restart
+    // relaunches the app once the user confirms.
+    maintenance: {
+        getPaths: (): Promise<MaintenancePaths> => ipcRenderer.invoke(IPC_MAINTENANCE_GET_PATHS),
+        reset: (selection: ResetSelection): Promise<ResetSummary> =>
+            ipcRenderer.invoke(IPC_MAINTENANCE_RESET, selection),
+        restart: (): Promise<{ restarting: boolean }> => ipcRenderer.invoke(IPC_MAINTENANCE_RESTART),
     },
 
     // File dialogs
