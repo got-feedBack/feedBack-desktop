@@ -66,7 +66,7 @@ under both the old filename key and the new `settings-v1-...` key after the
 Core `audio-effects` owns provider selection, policy, safe diagnostics, and the
 `slopsmith.audio_effects.chain_plan.v1` schema. Desktop owns the trusted physical
 executor. Renderer plugins may pass a core-resolved chain plan plus a private
-trusted asset map to `window.slopsmithDesktop.audioEffects.loadChainPlan(...)`;
+trusted asset map to `window.feedBackDesktop.audioEffects.loadChainPlan(...)`;
 desktop validates the schema, authorization, stage kinds, stage counts, opaque
 asset references, local asset paths, and extension/kind compatibility before it
 builds the native preset JSON and calls the existing native `loadPreset` path.
@@ -100,7 +100,7 @@ When migrating more desktop integrations to capabilities:
 - Use `target.settingsKey` for local per-song plugin settings.
 - Use `targetId` only for arrangement/session correlation, not persistent
   per-song settings.
-- Route effect-chain execution through `window.slopsmithDesktop.audioEffects`
+- Route effect-chain execution through `window.feedBackDesktop.audioEffects`
   rather than passing raw native preset JSON through plugin-visible capability
   state.
 - Keep raw filename fallback code behind a capability-version check.

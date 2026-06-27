@@ -372,7 +372,7 @@ const rendererWebPreferences: Electron.WebPreferences = {
 // a remote iframe can't ride the privileged preload, but the tutorials plugin
 // legitimately embeds YouTube. This is safe only because preload.ts now gates
 // its IPC bridge to the main frame — an allow-listed embed frame loads with no
-// slopsmithDesktop surface. Host-suffix match (exact host or `.`-prefixed
+// feedBackDesktop surface. Host-suffix match (exact host or `.`-prefixed
 // sub-domain) so `evil-youtube.com` / `youtube.com.evil.com` don't slip past.
 const EMBED_ALLOWED_HOSTS = ['youtube.com', 'youtube-nocookie.com'];
 function isAllowedEmbedUrl(url: string): boolean {
@@ -1094,7 +1094,7 @@ async function startup(): Promise<void> {
     ipcMain.handle(IPC_UPDATE_APPLY, () => updateManager.applyAndRestart());
 
     // Keep the display awake while a song plays (got-feedback/feedback#686). The
-    // renderer toggles this via window.slopsmithDesktop.power.setScreenAwake on
+    // renderer toggles this via window.feedBackDesktop.power.setScreenAwake on
     // play/pause; the single OS blocker is refcounted across renderers below.
     ipcMain.handle(IPC_POWER_SET_SCREEN_AWAKE, (event, keep: unknown) => {
         setRendererScreenAwake(event.sender, keep === true);

@@ -1,13 +1,13 @@
 // Slopsmith Audio Engine Plugin — Frontend
-// Communicates with the JUCE audio engine via window.slopsmithDesktop.audio
+// Communicates with the JUCE audio engine via window.feedBackDesktop.audio
 // Desktop audio engine plugin
 
-window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
+window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
 (function() {
     'use strict';
 
-    const api = window.slopsmithDesktop?.audio;
+    const api = window.feedBackDesktop?.audio;
     if (!api) {
         console.error('[audio-engine] Desktop audio API not available — running in browser mode');
         const panel = document.getElementById('audio-engine-panel');
@@ -21,7 +21,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
     // clear here — letting the prior interval keep running preserves mid-song
     // tone polling, since its closure refs (toneSwitcher, autoSwitchEnabled)
     // are still valid until the next playSong rotates to the new closure.
-    const hookState = window.__slopsmithDesktopAudioHooks;
+    const hookState = window.__feedBackDesktopAudioHooks;
 
     // ── State ─────────────────────────────────────────────────────────────────
     let audioRunning = false;
@@ -364,7 +364,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             audioSession.recordBridgeHit({
                 domain: 'audio-input',
                 bridgeId: 'audio-input.legacy-source',
-                legacySurface: 'window.slopsmithDesktop.audio',
+                legacySurface: 'window.feedBackDesktop.audio',
                 participantId: 'audio_engine',
                 logicalSourceKey: currentAudioDeviceSnapshot().inputDevice ? 'desktop-audio:selected-input' : '',
                 outcome: 'handled',
@@ -709,7 +709,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
     }
 
     function aeApplyNoiseGateToEngine() {
-        const bridge = window.slopsmithDesktop?.audio;
+        const bridge = window.feedBackDesktop?.audio;
         if (!bridge || typeof bridge.setNoiseGate !== 'function') {
             if (bridge && !window._aeNoiseGateBridgeWarned) {
                 window._aeNoiseGateBridgeWarned = true;
@@ -762,7 +762,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
     }
 
     function aeApplyTonePolishToEngine() {
-        const bridge = window.slopsmithDesktop?.audio;
+        const bridge = window.feedBackDesktop?.audio;
         if (!bridge || typeof bridge.setTonePolish !== 'function') {
             if (bridge && !window._aeTonePolishBridgeWarned) {
                 window._aeTonePolishBridgeWarned = true;
@@ -1351,7 +1351,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
 
         // Add NAM model
         addNamBtn.addEventListener('click', async () => {
-            const filePath = await window.slopsmithDesktop.pickFile([
+            const filePath = await window.feedBackDesktop.pickFile([
                 { name: 'NAM Models', extensions: ['nam'] }
             ]);
             if (filePath) {
@@ -1363,7 +1363,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         // Add IR
         addIrBtn.addEventListener('click', async () => {
             console.error('[audio-engine] IR button clicked, opening picker...');
-            const filePath = await window.slopsmithDesktop.pickFile([
+            const filePath = await window.feedBackDesktop.pickFile([
                 { name: 'Impulse Responses', extensions: ['wav', 'aif', 'ir'] },
                 { name: 'All Files', extensions: ['*'] }
             ]);
@@ -1478,7 +1478,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
 
     // ── Updater (Velopack) settings UI ────────────────────────────────────────
     // Reads/writes the persisted channel in localStorage and talks to the main
-    // process via window.slopsmithDesktop.update (added by the main-process slice).
+    // process via window.feedBackDesktop.update (added by the main-process slice).
     // Designed to degrade gracefully when the updater IPC namespace is missing
     // (dev builds before the main slice lands) or when running on Linux.
     function setupUpdateChannelControls() {
@@ -1493,8 +1493,8 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         const storedChannel = VALID_CHANNELS.includes(storedChannelRaw) ? storedChannelRaw : 'stable';
         channelSelect.value = storedChannel;
 
-        const updateApi = window.slopsmithDesktop?.update;
-        const isLinux = window.slopsmithDesktop?.platform === 'linux';
+        const updateApi = window.feedBackDesktop?.update;
+        const isLinux = window.feedBackDesktop?.platform === 'linux';
 
         function showLinuxFallback(message) {
             if (linuxNote) linuxNote.classList.remove('hidden');
@@ -1647,13 +1647,13 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
 
     // ── Reset / repair configuration (Maintenance) ────────────────────────────
     // Replaces the old "delete the config folder before upgrading" instruction.
-    // Talks to the main process via window.slopsmithDesktop.maintenance, which
+    // Talks to the main process via window.feedBackDesktop.maintenance, which
     // enumerates the correct per-OS paths and performs the delete. Binds fresh on
     // each settings render (the panel is injected via innerHTML, recreating the
     // DOM), mirroring setupAudioQualityControls. Degrades gracefully when the
     // maintenance IPC namespace is absent (browser / older build).
     function setupMaintenanceControls() {
-        const api = window.slopsmithDesktop?.maintenance;
+        const api = window.feedBackDesktop?.maintenance;
         const section = document.getElementById('maint-section');
         if (!section) return;
 
@@ -1751,7 +1751,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
 
     // ── Audio Quality (soundfont) ─────────────────────────────────────────────
     function setupAudioQualityControls() {
-        const api = window.slopsmithDesktop?.soundfont;
+        const api = window.feedBackDesktop?.soundfont;
         const defaultRadio = document.getElementById('ae-sf-default');
         const highRadio = document.getElementById('ae-sf-high');
         const highStatus = document.getElementById('ae-sf-high-status');
@@ -1863,7 +1863,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             if (saved) inputEl.value = saved;
 
             btnEl.addEventListener('click', async () => {
-                const dir = await window.slopsmithDesktop.pickDirectory();
+                const dir = await window.feedBackDesktop.pickDirectory();
                 if (dir) {
                     inputEl.value = dir;
                     localStorage.setItem('slopsmith-' + key, dir);
@@ -3406,7 +3406,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
                 });
                 // Apply MIDI mode immediately
                 window._toneMappingsDirty = true;
-                const _liveApi = window.slopsmithDesktop?.audio;
+                const _liveApi = window.feedBackDesktop?.audio;
                 const _midiMappings = mappingsObj;
                 const _midiVstSlot = vstSelect ? parseInt(vstSelect.value) : -1;
                 const _midiCh = chInput ? parseInt(chInput.value) : 1;
@@ -3445,7 +3445,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             const vstSelect = root.querySelector('#ae-midi-vst');
             const hint = root.querySelector('#ae-midi-vst-hint');
             if (!vstSelect) return;
-            const apiLocal = window.slopsmithDesktop?.audio;
+            const apiLocal = window.feedBackDesktop?.audio;
             if (!apiLocal || typeof apiLocal.getChainState !== 'function') {
                 vstSelect.innerHTML = '<option value="">(no audio bridge)</option>';
                 return;
@@ -3900,7 +3900,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
 (function() {
     // Hook registry shared across re-evaluations; see the IIFE 1 comment for
     // why we don't preemptively clear toneAutoMonitor here.
-    const hookState = window.__slopsmithDesktopAudioHooks;
+    const hookState = window.__feedBackDesktopAudioHooks;
     let _lastTone = null;
     // Throttle the "_toneSwitcher not ready" warning — the tone monitor polls
     // at 50ms, so without this it would log every tick while the switcher is
@@ -3940,7 +3940,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
     // mute would silence the dry guitar. Suppress the mute for the rebuild
     // window so the guitar keeps sounding; resolve it once the chain settles.
     function aeSetMonitorMuteSuppressed(suppressed) {
-        const api = window.slopsmithDesktop?.audio;
+        const api = window.feedBackDesktop?.audio;
         // Optional-chained: a downlevel native addon simply ignores this.
         // setMonitorMuteSuppressed is async (ipcRenderer.invoke) — the sync
         // try/catch only covers a missing method, so also swallow the
@@ -4003,7 +4003,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
     // monitor-mute behaviour; if not, keep the dry guitar audible (leave the
     // suppression on) rather than silencing it, and tell the user why.
     async function resolveChainRebuildGuard() {
-        const api = window.slopsmithDesktop?.audio;
+        const api = window.feedBackDesktop?.audio;
         if (!api) return;
         const providerRoute = window._aeInspectProviderManagedChain && window._aeInspectProviderManagedChain();
         if (providerRoute) {
@@ -4197,7 +4197,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             }
 
             // Preload presets for tone switching
-            const api = window.slopsmithDesktop?.audio;
+            const api = window.feedBackDesktop?.audio;
             const hw = window.highway || window._slopsmithHighway;
             if (!api || !hw) return;
 
@@ -4369,7 +4369,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
                         console.log('[tone-switcher] switchToTone called:', name, 'current:', this.activeTone, 'midiMode:', this.midiMode);
                         if (name === this.activeTone) return;
                         const program = midiMappings[name];
-                        const _api = window.slopsmithDesktop?.audio;
+                        const _api = window.feedBackDesktop?.audio;
                         console.log('[tone-switcher] program:', program, 'api:', !!_api, 'sendMidi:', !!_api?.sendMidiToSlot, 'slotId:', midiConfig.vstSlotId);
                         if (program !== undefined && _api?.sendMidiToSlot) {
                             _api.sendMidiToSlot(midiConfig.vstSlotId, 0, midiConfig.channel || 1, program);
@@ -4379,7 +4379,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
                     }
                 };
                 // Send initial PC for base tone
-                const _apiInit = window.slopsmithDesktop?.audio;
+                const _apiInit = window.feedBackDesktop?.audio;
                 if (midiMappings[toneBase] !== undefined && _apiInit?.sendMidiToSlot) {
                     _apiInit.sendMidiToSlot(midiConfig.vstSlotId, 0, midiConfig.channel || 1, midiMappings[toneBase]);
                 }
@@ -4617,13 +4617,13 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
 })();
 
 // ── Update-downloaded restart banner (top-level, runs even without audio API) ──
-// Subscribes to window.slopsmithDesktop.update.onDownloaded and renders a
+// Subscribes to window.feedBackDesktop.update.onDownloaded and renders a
 // persistent banner with a "Restart now" button. Degrades silently when the
 // updater IPC namespace is unavailable (e.g. dev builds before the main slice
 // lands, or unsupported platforms).
 (function() {
     'use strict';
-    const updateApi = window.slopsmithDesktop?.update;
+    const updateApi = window.feedBackDesktop?.update;
     if (!updateApi || typeof updateApi.onDownloaded !== 'function') return;
 
     const BANNER_ID = 'slopsmith-update-banner';
@@ -4632,7 +4632,7 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
     // unsubscribe fn — drop the listener a previous evaluation registered so
     // they don't pile up (renderUpdateBanner() de-dupes the DOM node, but the
     // listeners themselves would still leak).
-    const hookState = window.__slopsmithDesktopAudioHooks;
+    const hookState = window.__feedBackDesktopAudioHooks;
     if (typeof hookState.updateBannerUnsub === 'function') {
         try { hookState.updateBannerUnsub(); } catch (_) { /* defensive */ }
         hookState.updateBannerUnsub = null;

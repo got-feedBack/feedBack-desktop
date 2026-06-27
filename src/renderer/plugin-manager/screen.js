@@ -2,7 +2,7 @@
 (function() {
     'use strict';
 
-    const plugins = window.slopsmithDesktop?.plugins;
+    const plugins = window.feedBackDesktop?.plugins;
     if (!plugins) {
         const panel = document.getElementById('plugin-manager-panel');
         if (panel) panel.innerHTML = '<div class="p-8 text-center text-slate-400">Plugin manager is only available in the Slopsmith Desktop app.</div>';
@@ -110,7 +110,7 @@
     refreshBtn.addEventListener('click', refreshList);
 
     // ── LAN access toggle ───────────────────────────────────────────────
-    const network = window.slopsmithDesktop?.network;
+    const network = window.feedBackDesktop?.network;
     const lanToggle = $('pm-lan-toggle');
     const lanStatus = $('pm-lan-status');
 
