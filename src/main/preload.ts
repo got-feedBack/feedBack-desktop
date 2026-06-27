@@ -534,6 +534,12 @@ const feedBackDesktopApi = {
 
 if (isMainFrame) {
     contextBridge.exposeInMainWorld('feedBackDesktop', feedBackDesktopApi);
+    // Legacy alias — plugins and external/community code built against the
+    // pre-rename bridge still read window.slopsmithDesktop. Expose the same
+    // object under the old name so they keep working after the rename
+    // (got-feedback/feedBack-desktop#40). Same isMainFrame gating, so an
+    // allow-listed embed frame still gets no desktop surface under either name.
+    contextBridge.exposeInMainWorld('slopsmithDesktop', feedBackDesktopApi);
 }
 
 export {};
