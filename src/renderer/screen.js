@@ -1402,7 +1402,11 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 } else {
                     // Silence the live monitor now. Keep localStorage so ON restores it.
                     await api.clearChain();
-                    await refreshChain();
+                    // Render the empty chain directly — do NOT call refreshChain()/
+                    // getChainState() right after clearChain(); some JUCE bridges crash
+                    // on that sequence (see clearChainForNewSong).
+                    const _c = chainContainer || $('ae-chain');
+                    if (_c) _c.innerHTML = '<div class="text-sm text-slate-500 italic">No processors loaded — add a VST, NAM model, or cabinet IR</div>';
                 }
             } catch (e) { console.error('[audio-engine] amp-sim toggle apply failed:', e); }
         });
