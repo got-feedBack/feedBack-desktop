@@ -24,6 +24,7 @@ type AudioDeviceSettings = {
     bufferSize: string;
     inputChannel: string;
     monitorMute?: boolean;
+    monitorKill?: boolean;
     savedAt?: number;
 };
 
@@ -84,6 +85,9 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     };
     if (typeof record.monitorMute === 'boolean') {
         normalized.monitorMute = record.monitorMute;
+    }
+    if (typeof record.monitorKill === 'boolean') {
+        normalized.monitorKill = record.monitorKill;
     }
     const savedAt = Number(record.savedAt);
     if (Number.isFinite(savedAt) && savedAt > 0) {

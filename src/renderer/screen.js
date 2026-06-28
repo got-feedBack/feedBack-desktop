@@ -183,6 +183,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             inputChannel: normalizeSelectSettingValue(settings.inputChannel),
         };
         if (typeof settings.monitorMute === 'boolean') normalized.monitorMute = settings.monitorMute;
+        if (typeof settings.monitorKill === 'boolean') normalized.monitorKill = settings.monitorKill;
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
         return normalized;
