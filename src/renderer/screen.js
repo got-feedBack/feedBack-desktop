@@ -320,8 +320,21 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const audioSession = window.slopsmith && window.slopsmith.audioSession;
         if (!audioSession || typeof audioSession.registerInputSource !== 'function') return;
         const typeList = Array.isArray(currentDeviceTypes) ? currentDeviceTypes : [];
+        // When more than one driver type (host API) actually exposes inputs —
+        // the Windows case (ASIO, "Windows Audio"/WASAPI, DirectSound, …) — the
+        // SAME physical device enumerates once per type with an identical name.
+        // Tag the label with the driver type so the picker shows
+        // "Focusrite (ASIO)" vs "Focusrite (Windows Audio)" and consumers that
+        // de-dupe by label stop collapsing the variants the user must choose
+        // between. Suppressed when only one type has inputs (e.g. macOS Core
+        // Audio) — there the suffix would be redundant noise.
+        const typesWithInputs = typeList.filter(
+            (t) => Array.isArray(t && t.inputs) && t.inputs.length > 0
+        ).length;
+        const showDriverType = typesWithInputs > 1;
         typeList.forEach((typeInfo) => {
             const typeName = typeInfo && typeInfo.name ? String(typeInfo.name) : '';
+            const driverSuffix = (showDriverType && typeName) ? ` (${typeName})` : '';
             const inputs = Array.isArray(typeInfo && typeInfo.inputs) ? typeInfo.inputs : [];
             inputs.forEach((deviceName, index) => {
                 const logicalSourceKey = `desktop-audio:${safeKeyPart(typeName)}:input:${index}`;
@@ -341,14 +354,16 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     // pseudonyms and is returned UN-redacted, so putting a real
                     // name there would bypass redaction and leak PII (e.g.
                     // "Byron's AirPods"). Only the generic fallback is labelSafe.
-                    label: realName,
+                    label: realName + driverSuffix,
                     labelSafe: !hasRealName,
                     // Safe per-index fallback used when the audio-session
                     // sanitizer redacts a suspicious real name (e.g. one
                     // containing "Device" or 4+ digits), so redacted inputs stay
                     // distinguishable instead of collapsing to one generic label.
-                    pseudonym: `Desktop input ${index + 1}`,
-                    diagnosticsPseudonym: `Desktop input ${index + 1}`,
+                    // Carries the driver suffix too, so a redacted device's
+                    // ASIO/WASAPI variants don't both collapse to "Desktop input N".
+                    pseudonym: `Desktop input ${index + 1}${driverSuffix}`,
+                    diagnosticsPseudonym: `Desktop input ${index + 1}${driverSuffix}`,
                     availability: 'available',
                     sourceMode: 'native',
                     channelSummary: { channelCount: 2, channelShape: 'stereo', supports: ['mono', 'stereo'] },
