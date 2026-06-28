@@ -1916,17 +1916,23 @@ void AudioEngine::composeAndPushStreamMix(const juce::AudioBuffer<float>& guitar
                                           int backingFrames, float backingVol, int numSamples)
 {
     if (! streamSink.active.load(std::memory_order_acquire)) return;
-    // Undersized scratch (reconfig race) — skip this block rather than alloc on RT.
-    if (streamMixScratch.getNumSamples() < numSamples) return;
     // A block larger than the entire ring can't be published atomically (it would
     // wrap and overwrite unread slots before writeIndex is bumped). Skip it and
-    // count an overflow. The split path already rejects oversized devices at setup;
+    // count an overflow. Checked FIRST (before the scratch guard) so an oversized
+    // block is always counted — the fixed-size scratch is exactly the ring, so an
+    // oversized block also trips the scratch guard below and would otherwise be
+    // dropped silently. The split path already rejects oversized devices at setup;
     // this guards the duplex path, whose block size we don't pre-validate.
     if (numSamples > (int) kOutputRingFrames)
     {
         streamSink.overflowCount.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // Scratch not yet sized to the full ring (cold start before the producer's
+    // about-to-start ran, or a transient reconfig) — skip rather than alloc on RT.
+    // After warm-up the scratch is exactly the ring, so for an in-range block this
+    // never trips.
+    if (streamMixScratch.getNumSamples() < numSamples) return;
 
     const bool  ig   = streamBusIncludeGuitar.load(std::memory_order_relaxed);
     const bool  ib   = streamBusIncludeBacking.load(std::memory_order_relaxed);
