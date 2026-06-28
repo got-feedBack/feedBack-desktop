@@ -143,6 +143,13 @@ public:
     bool isMonitorMuted() const { return monitorMuted.load(); }
     void setMonitorMuteSuppressed(bool s) { monitorMuteSuppressed.store(s); }
     bool isMonitorMuteSuppressed() const { return monitorMuteSuppressed.load(); }
+    // Full monitor kill — silences the guitar bus UNCONDITIONALLY (dry AND the
+    // processed/amp-sim signal), unlike setMonitorMute which only mutes the dry
+    // pass-through when no processors are loaded. For users who monitor through
+    // their own external rig and want zero in-app monitoring. Default off, so
+    // existing amp-sim monitoring is unaffected.
+    void setMonitorKill(bool kill) { monitorKill.store(kill); }
+    bool isMonitorKilled() const { return monitorKill.load(); }
 
     float getInputLevel() const { return currentInputLevel.load(); }
     float getInputPeak() const { return inputPeak.load(); }
@@ -192,6 +199,7 @@ private:
     std::atomic<double> verifierUserOffset{0.0}; // renderer: manual fine-tune
     std::atomic<bool> monitorMuted{true};
     std::atomic<bool> monitorMuteSuppressed{false};
+    std::atomic<bool> monitorKill{false};
     std::atomic<uint32_t> nonFiniteChainBlocks{0};
 
     // ── Lock-free SPSC input rings (see AudioEngine.h for the full rationale) ──

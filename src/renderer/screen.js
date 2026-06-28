@@ -55,6 +55,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     const inputGainLabel = $('ae-input-gain-label');
     const outputGainLabel = $('ae-output-gain-label');
     const monitorMuteCheckbox = $('ae-monitor-mute');
+    const monitorKillCheckbox = $('ae-monitor-kill');
     const chainContainer = $('ae-chain');
     const addVstBtn = $('ae-add-vst');
     const addNamBtn = $('ae-add-nam');
@@ -122,6 +123,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             bufferSize: bufferSizeSelect.value,
             inputChannel: inputChannelSelect.value,
             monitorMute: monitorMuteCheckbox.checked,
+            monitorKill: monitorKillCheckbox.checked,
         };
     }
 
@@ -181,6 +183,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             inputChannel: normalizeSelectSettingValue(settings.inputChannel),
         };
         if (typeof settings.monitorMute === 'boolean') normalized.monitorMute = settings.monitorMute;
+        if (typeof settings.monitorKill === 'boolean') normalized.monitorKill = settings.monitorKill;
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
         return normalized;
@@ -842,6 +845,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 try { await api.setMonitorMute(saved.monitorMute); }
                 catch (e) { console.warn('[audio-engine] setMonitorMute restore failed:', e); }
             }
+            if (saved.monitorKill !== undefined) {
+                monitorKillCheckbox.checked = saved.monitorKill;
+                // Push immediately too — same reason as monitorMute above; the
+                // native default is monitorKill{false}, so a saved-true must be
+                // applied even if the device probe below fails.
+                try { await api.setMonitorKill?.(saved.monitorKill); }
+                catch (e) { console.warn('[audio-engine] setMonitorKill restore failed:', e); }
+            }
 
             // Respect refreshDeviceOptions's fail-closed verdict: if the
             // probe didn't explicitly confirm compatible=true, skip the
@@ -1272,6 +1283,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 const inputChannel = parseInt(inputChannelSelect.value);
                 if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
                 await api.setMonitorMute(monitorMuteCheckbox.checked);
+                await api.setMonitorKill?.(monitorKillCheckbox.checked);
                 await api.startAudio();
                 audioRunning = true;
                 toggleBtn.textContent = 'Stop';
@@ -1307,6 +1319,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         monitorMuteCheckbox.addEventListener('change', async () => {
             await api.setMonitorMute(monitorMuteCheckbox.checked);
             await saveAppliedDeviceSettings({ monitorMute: monitorMuteCheckbox.checked });
+        });
+
+        // Disable input monitoring (full kill) — for playing through an external
+        // rig. Applies live; the dry-only "Mute direct monitoring" can't silence a
+        // loaded amp sim, this can.
+        monitorKillCheckbox.addEventListener('change', async () => {
+            await api.setMonitorKill?.(monitorKillCheckbox.checked);
+            await saveAppliedDeviceSettings({ monitorKill: monitorKillCheckbox.checked });
         });
 
         // Gain sliders (UI dB → linear amplitude for engine)

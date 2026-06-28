@@ -24,6 +24,7 @@ type AudioDeviceSettings = {
     bufferSize: string;
     inputChannel: string;
     monitorMute?: boolean;
+    monitorKill?: boolean;
     savedAt?: number;
 };
 
@@ -84,6 +85,9 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     };
     if (typeof record.monitorMute === 'boolean') {
         normalized.monitorMute = record.monitorMute;
+    }
+    if (typeof record.monitorKill === 'boolean') {
+        normalized.monitorKill = record.monitorKill;
     }
     const savedAt = Number(record.savedAt);
     if (Number.isFinite(savedAt) && savedAt > 0) {
@@ -534,6 +538,15 @@ export function initAudioBridge(): void {
 
     ipcMain.handle('audio:isMonitorMuted', () => {
         return audio?.isMonitorMuted() ?? true;
+    });
+
+    ipcMain.handle('audio:setMonitorKill', (_event, kill: boolean) => {
+        // typeof-guarded fail-soft: a downlevel addon without setMonitorKill is a
+        // no-op rather than a thrown IPC error. Coerced to a real boolean so the
+        // N-API IsBoolean() guard sees a clean value.
+        if (audio && typeof audio.setMonitorKill === 'function') {
+            audio.setMonitorKill(Boolean(kill));
+        }
     });
 
     ipcMain.handle(

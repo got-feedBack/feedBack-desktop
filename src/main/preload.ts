@@ -241,6 +241,7 @@ const feedBackDesktopApi = {
         setMonitorMuteSuppressed: (suppressed: boolean) =>
             ipcRenderer.invoke('audio:setMonitorMuteSuppressed', suppressed),
         isMonitorMuted: () => ipcRenderer.invoke('audio:isMonitorMuted'),
+        setMonitorKill: (kill: boolean) => ipcRenderer.invoke('audio:setMonitorKill', kill),
         setNoiseGate: (payload: {
             enabled: boolean;
             thresholdDb: number;

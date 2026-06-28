@@ -174,6 +174,21 @@ public:
     void setMonitorMuteSuppressed(bool suppressed) { source0().setMonitorMuteSuppressed(suppressed); }
     bool isMonitorMuteSuppressed() const { return source0().isMonitorMuteSuppressed(); }
 
+    // Full monitor kill — silences the guitar bus entirely (dry + processed),
+    // for monitoring through an external rig. Unlike the per-source mute/gain
+    // controls (which delegate to source0()), this is a GLOBAL "play through my
+    // own rig" preference, so it's applied to EVERY pooled source — active or
+    // not — so additional inputs are silenced too and a later addSource()
+    // inherits it (addSource never resets the flag). The fixed pool's pointers
+    // are never reassigned, and these are plain atomic stores, so iterating it
+    // off the control thread is race-free. Default off; see SourceChain.
+    void setMonitorKill(bool kill)
+    {
+        for (auto& s : sources)
+            if (s) s->setMonitorKill(kill);
+    }
+    bool isMonitorKilled() const { return source0().isMonitorKilled(); }
+
     // Number of audio blocks whose signal-chain output had to be scrubbed for
     // non-finite/runaway samples (issue #403). A nonzero value means the chain
     // (NAM/IR/VST) emitted garbage that was contained before it reached the

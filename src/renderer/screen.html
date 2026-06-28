@@ -40,7 +40,15 @@
                     <input type="checkbox" id="ae-monitor-mute" checked
                            class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-emerald-500">
                     <span class="text-sm text-slate-300">Mute direct monitoring</span>
-                    <span class="text-xs text-slate-500">(only hear guitar through signal chain plugins)</span>
+                    <span class="text-xs text-slate-500">(mutes the dry passthrough only — a loaded amp sim is still heard; use “Disable input monitoring” below to silence everything)</span>
+                </label>
+            </div>
+            <div class="md:col-span-2">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="ae-monitor-kill"
+                           class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-emerald-500">
+                    <span class="text-sm text-slate-300">Disable input monitoring</span>
+                    <span class="text-xs text-slate-500">(play through your own amp/rig — silences all in-app monitoring, including amp sims)</span>
                 </label>
             </div>
             <div>
