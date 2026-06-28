@@ -56,6 +56,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     const outputGainLabel = $('ae-output-gain-label');
     const monitorMuteCheckbox = $('ae-monitor-mute');
     const monitorKillCheckbox = $('ae-monitor-kill');
+    const ampSimsCheckbox = $('ae-amp-sims');
     const chainContainer = $('ae-chain');
     const addVstBtn = $('ae-add-vst');
     const addNamBtn = $('ae-add-nam');
@@ -893,43 +894,80 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             }
         }
 
+        // Amp-sim opt-in gate (feedBack-desktop#46). Only auto-load a tone chain
+        // for monitoring when the user opted into in-app amp sims. Default OFF
+        // ("own-rig first") so players monitoring through their own external amp/
+        // rig get clean, silent monitoring and never the idle distorted buzz. The
+        // preference lives in core /api/settings (set during onboarding and via
+        // the "Use in-app amp sims" toggle below); a missing key or failed read is
+        // treated as OFF so a flaky backend can't resurrect the buzz.
+        const _ampSimsEnabled = await aeUseAmpSims();
+        ampSimsCheckbox.checked = _ampSimsEnabled;
+
         // Try the default preset first; only restore the saved chain if no default preset is
         // configured or the preset load fails (corrupted blob, missing VST, etc.). This avoids
         // redundant native load/unload when the preset immediately replaces the chain, while
         // ensuring a valid chain is always available as a fallback.
         let _defaultLoaded = false;
-        try {
-            _defaultLoaded = await loadDefaultPreset('app-init');
-        } catch (e) {
-            console.error('[audio-engine] Default preset load threw at init; falling back to saved chain:', e);
-        }
-        if (!_defaultLoaded) {
-            let savedChain;
+        if (_ampSimsEnabled) {
             try {
-                savedChain = JSON.parse(localStorage.getItem('slopsmith-signal-chain') || '[]');
-                if (!Array.isArray(savedChain)) savedChain = [];
+                _defaultLoaded = await loadDefaultPreset('app-init');
             } catch (e) {
-                console.warn('[audio-engine] Corrupted slopsmith-signal-chain; starting empty:', e);
-                savedChain = [];
+                console.error('[audio-engine] Default preset load threw at init; falling back to saved chain:', e);
             }
-            for (const item of savedChain) {
-                try {
-                    if (item.type === 'VST' && item.path) {
-                        await api.loadVST(item.path);
-                    } else if (item.type === 'NAM' && item.path) {
-                        await api.loadNAMModel(item.path);
-                    } else if (item.type === 'IR' && item.path) {
-                        await api.loadIR(item.path);
-                    }
-                } catch (e) {
-                    console.error('[audio-engine] Failed to restore chain item:', item, e);
-                }
-            }
-            if (savedChain.length > 0) await refreshChain();
+        } else {
+            console.info('[audio-engine] Amp sims opt-out — skipping saved tone-chain restore (own-rig monitoring).');
+        }
+        if (_ampSimsEnabled && !_defaultLoaded) {
+            await aeRestoreSavedChain();
         }
 
         aeApplyNoiseGateToEngine();
         aeApplyTonePolishToEngine();
+    }
+
+    // Read the core "use in-app amp sims" preference (feedBack-desktop#46).
+    // Default OFF — a missing key or any read failure is treated as opt-OUT so a
+    // flaky/late backend never resurrects the idle amp-sim buzz for own-rig users.
+    async function aeUseAmpSims() {
+        try {
+            const r = await fetch('/api/settings');
+            if (!r.ok) return false;
+            const s = await r.json();
+            return !!(s && s.use_amp_sims === true);
+        } catch (e) {
+            console.warn('[audio-engine] use_amp_sims read failed; assuming opt-out:', e);
+            return false;
+        }
+    }
+
+    // Restore the persisted signal chain (VST/NAM/IR) into the engine. Shared by
+    // app init (when amp sims are opted in) and the live "Use in-app amp sims"
+    // opt-in toggle. Each item failure is contained so one bad plugin can't abort
+    // the rest of the chain.
+    async function aeRestoreSavedChain() {
+        let savedChain;
+        try {
+            savedChain = JSON.parse(localStorage.getItem('slopsmith-signal-chain') || '[]');
+            if (!Array.isArray(savedChain)) savedChain = [];
+        } catch (e) {
+            console.warn('[audio-engine] Corrupted slopsmith-signal-chain; starting empty:', e);
+            savedChain = [];
+        }
+        for (const item of savedChain) {
+            try {
+                if (item.type === 'VST' && item.path) {
+                    await api.loadVST(item.path);
+                } else if (item.type === 'NAM' && item.path) {
+                    await api.loadNAMModel(item.path);
+                } else if (item.type === 'IR' && item.path) {
+                    await api.loadIR(item.path);
+                }
+            } catch (e) {
+                console.error('[audio-engine] Failed to restore chain item:', item, e);
+            }
+        }
+        if (savedChain.length > 0) await refreshChain();
     }
 
     function saveChainStateFromChain(chain) {
@@ -1327,6 +1365,31 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         monitorKillCheckbox.addEventListener('change', async () => {
             await api.setMonitorKill?.(monitorKillCheckbox.checked);
             await saveAppliedDeviceSettings({ monitorKill: monitorKillCheckbox.checked });
+        });
+
+        // Use in-app amp sims (feedBack-desktop#46) — persists the opt-in to core
+        // /api/settings (shared with the onboarding choice). Default OFF / own-rig.
+        // The saved tone chain is (re)loaded from this preference at app init
+        // (see aeUseAmpSims gate); turning it ON here loads the saved chain now so
+        // the change is immediate, OFF leaves the current chain for this session
+        // (it just won't auto-restore next launch — the monitor stays silenceable
+        // via "Mute direct monitoring" / "Disable input monitoring" above).
+        ampSimsCheckbox.addEventListener('change', async () => {
+            const on = ampSimsCheckbox.checked;
+            try {
+                await fetch('/api/settings', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ use_amp_sims: on }),
+                });
+            } catch (e) { console.warn('[audio-engine] use_amp_sims persist failed:', e); }
+            if (on) {
+                // Opted in — load the saved chain now (mirrors init's restore path)
+                // so the user hears their tone without an app restart.
+                let _loaded = false;
+                try { _loaded = await loadDefaultPreset('amp-sims-optin'); }
+                catch (e) { console.error('[audio-engine] default preset load failed on opt-in:', e); }
+                if (!_loaded) await aeRestoreSavedChain();
+            }
         });
 
         // Gain sliders (UI dB → linear amplitude for engine)
