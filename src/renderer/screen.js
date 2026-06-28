@@ -1369,27 +1369,42 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
         // Use in-app amp sims (feedBack-desktop#46) — persists the opt-in to core
         // /api/settings (shared with the onboarding choice). Default OFF / own-rig.
-        // The saved tone chain is (re)loaded from this preference at app init
-        // (see aeUseAmpSims gate); turning it ON here loads the saved chain now so
-        // the change is immediate, OFF leaves the current chain for this session
-        // (it just won't auto-restore next launch — the monitor stays silenceable
-        // via "Mute direct monitoring" / "Disable input monitoring" above).
+        // Applies LIVE so the checkbox is truthful this session, not just next
+        // launch:
+        //   ON  — clear then (re)load the saved tone chain so the user hears their
+        //         tone now without duplicating processors onto an existing chain.
+        //   OFF — clear the live engine chain so monitoring actually goes silent
+        //         (with no processors, the default-on dry mute silences the bus).
+        //         The SAVED chain in localStorage is left intact so re-enabling
+        //         restores the same tone — so we deliberately do NOT saveChainState().
         ampSimsCheckbox.addEventListener('change', async () => {
             const on = ampSimsCheckbox.checked;
             try {
-                await fetch('/api/settings', {
+                const r = await fetch('/api/settings', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ use_amp_sims: on }),
                 });
+                if (!r.ok) console.warn('[audio-engine] use_amp_sims persist HTTP', r.status);
             } catch (e) { console.warn('[audio-engine] use_amp_sims persist failed:', e); }
-            if (on) {
-                // Opted in — load the saved chain now (mirrors init's restore path)
-                // so the user hears their tone without an app restart.
-                let _loaded = false;
-                try { _loaded = await loadDefaultPreset('amp-sims-optin'); }
-                catch (e) { console.error('[audio-engine] default preset load failed on opt-in:', e); }
-                if (!_loaded) await aeRestoreSavedChain();
-            }
+            try {
+                if (on) {
+                    // loadDefaultPreset → replaceChainWithPresetBlob clears first; if
+                    // there's no default preset it returns false WITHOUT clearing, so
+                    // clear explicitly before the saved-chain restore to avoid stacking
+                    // a duplicate chain on top of whatever is already loaded.
+                    let _loaded = false;
+                    try { _loaded = await loadDefaultPreset('amp-sims-optin'); }
+                    catch (e) { console.error('[audio-engine] default preset load failed on opt-in:', e); }
+                    if (!_loaded) {
+                        await api.clearChain();
+                        await aeRestoreSavedChain();
+                    }
+                } else {
+                    // Silence the live monitor now. Keep localStorage so ON restores it.
+                    await api.clearChain();
+                    await refreshChain();
+                }
+            } catch (e) { console.error('[audio-engine] amp-sim toggle apply failed:', e); }
         });
 
         // Gain sliders (UI dB → linear amplitude for engine)
