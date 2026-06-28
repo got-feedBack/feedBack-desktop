@@ -236,6 +236,15 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
     if (monitorMuted.load() && !hasProcessors && !monitorMuteSuppressed.load())
         buffer.clear();
 
+    // Full monitor kill: silence the guitar bus unconditionally — dry AND the
+    // processed/amp-sim signal — for users who monitor through their own external
+    // rig. Distinct from the dry-only mute above (which a loaded chain bypasses),
+    // and NOT subject to the suppression guard. Runs after the chain so the pitch
+    // detector / metering still see real signal; the backing track is mixed in
+    // later, so it keeps playing.
+    if (monitorKill.load())
+        buffer.clear();
+
     // Chain output gain — the amp/tone's output level. Applied to the guitar
     // signal ONLY, before the backing track is mixed in, so switching tone presets
     // changes the guitar level without touching the song volume.

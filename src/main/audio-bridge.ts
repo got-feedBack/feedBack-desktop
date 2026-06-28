@@ -536,6 +536,15 @@ export function initAudioBridge(): void {
         return audio?.isMonitorMuted() ?? true;
     });
 
+    ipcMain.handle('audio:setMonitorKill', (_event, kill: boolean) => {
+        // typeof-guarded fail-soft: a downlevel addon without setMonitorKill is a
+        // no-op rather than a thrown IPC error. Coerced to a real boolean so the
+        // N-API IsBoolean() guard sees a clean value.
+        if (audio && typeof audio.setMonitorKill === 'function') {
+            audio.setMonitorKill(Boolean(kill));
+        }
+    });
+
     ipcMain.handle(
         'audio:setNoiseGate',
         (

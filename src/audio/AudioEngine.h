@@ -174,6 +174,11 @@ public:
     void setMonitorMuteSuppressed(bool suppressed) { source0().setMonitorMuteSuppressed(suppressed); }
     bool isMonitorMuteSuppressed() const { return source0().isMonitorMuteSuppressed(); }
 
+    // Full monitor kill — silences the guitar bus entirely (dry + processed),
+    // for monitoring through an external rig. Default off; see SourceChain.
+    void setMonitorKill(bool kill) { source0().setMonitorKill(kill); }
+    bool isMonitorKilled() const { return source0().isMonitorKilled(); }
+
     // Number of audio blocks whose signal-chain output had to be scrubbed for
     // non-finite/runaway samples (issue #403). A nonzero value means the chain
     // (NAM/IR/VST) emitted garbage that was contained before it reached the
