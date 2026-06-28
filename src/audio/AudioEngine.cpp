@@ -1750,14 +1750,16 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         sourceMonitorScratch.setSize(2, bs, false, false, true);
 
     // Producer-side stream-mix scratch (duplex path runs here). Sized to a FIXED
-    // capacity (>= the ring) rather than the live block size: in split mode the
-    // OUTPUT callback is the producer that uses these buffers while THIS (input)
-    // about-to-start can fire on a hotplug/resume — a block-size-driven realloc
-    // here would then free memory out from under the live producer. A one-time
-    // grow to kStreamScratchCap means same-or-smaller block restarts never realloc.
-    const int streamCap = juce::jmax(bs, (int) kOutputRingFrames);
-    if (streamGuitarScratch.getNumSamples() < streamCap) streamGuitarScratch.setSize(2, streamCap, false, false, true);
-    if (streamMixScratch.getNumSamples() < streamCap)    streamMixScratch.setSize(2, streamCap, false, false, true);
+    // capacity equal to the ring and NEVER grown with the block size: in split mode
+    // the OUTPUT callback is the producer that uses these buffers while THIS (input)
+    // about-to-start can fire on a hotplug/resume — a block-size-driven realloc here
+    // would free memory out from under the live producer. A block larger than the
+    // ring can't be published anyway and is skipped by the capacity guard in
+    // composeAndPushStreamMix(), so a fixed cap is sufficient AND allocates exactly
+    // once: it can never realloc under a live producer, for any later block size.
+    constexpr int streamScratchCap = (int) kOutputRingFrames;
+    if (streamGuitarScratch.getNumSamples() < streamScratchCap) streamGuitarScratch.setSize(2, streamScratchCap, false, false, true);
+    if (streamMixScratch.getNumSamples() < streamScratchCap)    streamMixScratch.setSize(2, streamScratchCap, false, false, true);
 
     // Prepare each ACTIVE PRIMARY-device source's DSP and reset its rings for a
     // clean cold start. Inactive pooled chains stay unprepared (no threads). EXTRA-
@@ -1837,12 +1839,13 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
     if ((int) outputPullScratchR.size() < bs) outputPullScratchR.assign((size_t) bs, 0.0f);
 
     // Producer-side stream-mix scratch (split path composes the stream submix in
-    // this output callback). Fixed capacity (>= the ring) so a same-or-smaller
-    // block restart on EITHER clock can't realloc these under a live producer — see
-    // the matching note in audioDeviceAboutToStart().
-    const int streamCap = juce::jmax(bs, (int) kOutputRingFrames);
-    if (streamGuitarScratch.getNumSamples() < streamCap) streamGuitarScratch.setSize(2, streamCap, false, false, true);
-    if (streamMixScratch.getNumSamples() < streamCap)    streamMixScratch.setSize(2, streamCap, false, false, true);
+    // this output callback). Fixed capacity == the ring, never grown — a block
+    // restart on EITHER clock can't realloc these under a live producer, for any
+    // block size (oversized blocks are skipped, not buffered). See the matching
+    // note in audioDeviceAboutToStart().
+    constexpr int streamScratchCap = (int) kOutputRingFrames;
+    if (streamGuitarScratch.getNumSamples() < streamScratchCap) streamGuitarScratch.setSize(2, streamScratchCap, false, false, true);
+    if (streamMixScratch.getNumSamples() < streamScratchCap)    streamMixScratch.setSize(2, streamScratchCap, false, false, true);
     // NOTE: outputBackingBuffer is sized by audioDeviceAboutToStart() from the
     // INPUT device's block size — it's the split-input DSP scratch, not an
     // output-side buffer. Don't touch it here: resizing from the output
@@ -2029,9 +2032,13 @@ juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, co
 
     // Stop the producer from writing the ring while we (re)configure the device:
     // setAudioDeviceSetup() below drives streamSinkAboutToStart(), which resets the
-    // ring indices and slots — that must not race a concurrent composeAndPushStreamMix()
-    // on the main callback. The main callback observes active=false within one block,
-    // long before the device reopen completes; we only re-arm after a clean open.
+    // ring indices and slots. Clearing `active` first stops the main callback from
+    // STARTING new pushes. A producer block already past the active-check can still
+    // finish one push, but the device close/reopen takes far longer than a single
+    // audio block, so that in-flight push completes well before about-to-start runs.
+    // Worst case is therefore one imperfect block on the STREAM bus (never the local
+    // monitor) during a manual device switch — atomic, no data race, no UAF. We only
+    // re-arm `active` after a fully clean open.
     streamSink.active.store(false, std::memory_order_release);
 
     // Any failure below: detach/close the half-open device AND drop the desired
