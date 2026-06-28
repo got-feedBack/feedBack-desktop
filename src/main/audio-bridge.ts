@@ -799,6 +799,51 @@ export function initAudioBridge(): void {
         }
     });
 
+    // ── Streamer mix output (PR1) ───────────────────────────────────────────
+    ipcMain.handle('audio:setStreamOutputDevice', (_event, typeName: unknown, deviceName: unknown) => {
+        if (!audio || typeof audio.setStreamOutputDevice !== 'function') return 'unsupported';
+        if (typeof typeName !== 'string' || typeof deviceName !== 'string') return 'invalid arguments';
+        try {
+            return audio.setStreamOutputDevice(typeName, deviceName);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`[audio] setStreamOutputDevice failed: ${msg}`);
+            return msg;
+        }
+    });
+
+    ipcMain.handle('audio:clearStreamOutput', () => {
+        if (audio && typeof audio.clearStreamOutput === 'function') audio.clearStreamOutput();
+    });
+
+    ipcMain.handle('audio:setStreamBus', (_event, includeBacking: unknown, includeGuitar: unknown, gain: unknown) => {
+        if (audio && typeof audio.setStreamBus === 'function') {
+            audio.setStreamBus(Boolean(includeBacking), Boolean(includeGuitar),
+                typeof gain === 'number' ? gain : 1.0);
+        }
+    });
+
+    ipcMain.handle('audio:setStreamBusGain', (_event, gain: unknown) => {
+        if (audio && typeof audio.setStreamBusGain === 'function' && typeof gain === 'number') {
+            audio.setStreamBusGain(gain);
+        }
+    });
+
+    ipcMain.handle('audio:getStreamSinkLevel', () => {
+        if (!audio || typeof audio.getStreamSinkLevel !== 'function') return 0;
+        return audio.getStreamSinkLevel();
+    });
+
+    ipcMain.handle('audio:isStreamOutputActive', () => {
+        if (!audio || typeof audio.isStreamOutputActive !== 'function') return false;
+        return audio.isStreamOutputActive();
+    });
+
+    ipcMain.handle('audio:getStreamUnderflowCount', () => {
+        if (!audio || typeof audio.getStreamUnderflowCount !== 'function') return 0;
+        return audio.getStreamUnderflowCount();
+    });
+
     ipcMain.handle('audio:removeSource', (_event, id: unknown) => {
         if (!audio || typeof audio.removeSource !== 'function') return false;
         if (!validSourceId(id)) return false;

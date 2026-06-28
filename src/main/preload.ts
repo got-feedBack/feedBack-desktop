@@ -348,6 +348,18 @@ const feedBackDesktopApi = {
             ipcRenderer.invoke('audio:bindInputDevice', deviceKey, deviceName),
         unbindInputDevice: (deviceKey: number): Promise<boolean> =>
             ipcRenderer.invoke('audio:unbindInputDevice', deviceKey),
+        // Streamer mix output (PR1): a second output device carrying an independent
+        // game ± guitar submix for OBS/Discord capture.
+        setStreamOutputDevice: (typeName: string, deviceName: string): Promise<string> =>
+            ipcRenderer.invoke('audio:setStreamOutputDevice', typeName, deviceName),
+        clearStreamOutput: (): Promise<void> => ipcRenderer.invoke('audio:clearStreamOutput'),
+        setStreamBus: (includeBacking: boolean, includeGuitar: boolean, gain: number): Promise<void> =>
+            ipcRenderer.invoke('audio:setStreamBus', includeBacking, includeGuitar, gain),
+        setStreamBusGain: (gain: number): Promise<void> =>
+            ipcRenderer.invoke('audio:setStreamBusGain', gain),
+        getStreamSinkLevel: (): Promise<number> => ipcRenderer.invoke('audio:getStreamSinkLevel'),
+        isStreamOutputActive: (): Promise<boolean> => ipcRenderer.invoke('audio:isStreamOutputActive'),
+        getStreamUnderflowCount: (): Promise<number> => ipcRenderer.invoke('audio:getStreamUnderflowCount'),
         setSourceInputChannel: (id: number, channel: number): Promise<void> =>
             ipcRenderer.invoke('audio:setSourceInputChannel', id, channel),
         setSourceVerifierOffset: (id: number, seconds: number): Promise<void> =>

@@ -109,6 +109,58 @@
         </div>
     </div>
 
+    <!-- Streaming & Extra Outputs (PR1: one stream bus → a second output device for
+         OBS/Discord capture, independent of your local monitor). Advanced; off by default. -->
+    <div class="mb-6">
+        <h3 class="text-lg font-semibold mb-3 text-slate-200">Streaming &amp; Extra Outputs</h3>
+        <p class="text-xs text-slate-400 mb-3">
+            Send a separate mix (game &plusmn; your guitar tone) to a second output device that
+            OBS or Discord can capture &mdash; while you keep monitoring here. Pick a spare output
+            or a virtual cable; on Discord, share that device or use Go&nbsp;Live.
+        </p>
+        <label class="flex items-center gap-2 cursor-pointer mb-3">
+            <input type="checkbox" id="ae-stream-enable"
+                   class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-fuchsia-500">
+            <span class="text-sm text-slate-300">Send a stream mix to a second output</span>
+        </label>
+        <div id="ae-stream-config" class="space-y-3" style="display: none;">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Stream Output Type</label>
+                    <select id="ae-stream-type" class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm"></select>
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Stream Output Device</label>
+                    <select id="ae-stream-device" class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm"></select>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-4">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="ae-stream-game" checked
+                           class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-fuchsia-500">
+                    <span class="text-sm text-slate-300">Include game audio</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="ae-stream-guitar" checked
+                           class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-fuchsia-500">
+                    <span class="text-sm text-slate-300">Include my guitar tone</span>
+                </label>
+            </div>
+            <div>
+                <label class="block text-xs text-slate-400 mb-1">Stream level</label>
+                <div class="h-4 bg-slate-800 rounded overflow-hidden">
+                    <div id="ae-stream-meter" class="h-full bg-fuchsia-500 transition-all duration-75" style="width:0%"></div>
+                </div>
+                <div class="flex justify-between mt-1">
+                    <input type="range" id="ae-stream-gain" min="-60" max="12" step="0.1" value="0" class="w-full accent-fuchsia-500">
+                    <span id="ae-stream-gain-label" class="text-xs text-slate-400 ml-2 whitespace-nowrap">0.0 dB</span>
+                </div>
+                <p class="text-[11px] text-fuchsia-300/80 mt-1">This is what OBS/Discord will hear.</p>
+            </div>
+            <p id="ae-stream-status" class="text-xs text-slate-400"></p>
+        </div>
+    </div>
+
     <!-- Noise Gate (AmpliTube-style: threshold, release, depth → native setNoiseGate) -->
     <div class="mb-6">
         <h3 class="text-lg font-semibold mb-3 text-slate-200">Noise Gate</h3>

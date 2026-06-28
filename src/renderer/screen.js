@@ -50,6 +50,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     const applyDeviceBtn = $('ae-apply-device');
     const meterInput = $('ae-meter-input');
     const meterOutput = $('ae-meter-output');
+    let streamMeterEl = null; // assigned in setupStreaming(); read by the meter poll
     const inputGainSlider = $('ae-input-gain');
     const outputGainSlider = $('ae-output-gain');
     const inputGainLabel = $('ae-input-gain-label');
@@ -1014,6 +1015,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         await refreshDeviceOptions();
         registerAudioSessionInputSources();
         registerAudioSessionMixParticipants();
+
+        // Streamer mix output section (PR1) — wires after device types are known.
+        setupStreaming();
     }
 
     function updateInputDeviceDropdown(typeInfo) {
@@ -1039,6 +1043,88 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     function updateDeviceDropdowns(typeInfo) {
         updateInputDeviceDropdown(typeInfo);
         updateOutputDeviceDropdown(typeInfo);
+    }
+
+    // ── Streaming & Extra Outputs (PR1) ────────────────────────────────────────
+    // Wires the stream-output section: a second output device carrying a game ±
+    // guitar submix for OBS/Discord capture. Persists to localStorage. Desktop-only
+    // — without the native bridge methods the section disables itself.
+    function setupStreaming() {
+        const enable = $('ae-stream-enable');
+        const config = $('ae-stream-config');
+        const typeSel = $('ae-stream-type');
+        const devSel = $('ae-stream-device');
+        const gameCb = $('ae-stream-game');
+        const guitarCb = $('ae-stream-guitar');
+        const gain = $('ae-stream-gain');
+        const gainLabel = $('ae-stream-gain-label');
+        const statusEl = $('ae-stream-status');
+        streamMeterEl = $('ae-stream-meter');
+        if (!enable || !config || !typeSel || !devSel) return;
+        if (!api || typeof api.setStreamOutputDevice !== 'function') {
+            enable.disabled = true; // no native stream support in this build
+            if (statusEl) statusEl.textContent = 'Not available in this build.';
+            return;
+        }
+
+        const LS = 'ae.stream';
+        const load = () => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch (_) { return {}; } };
+        const save = () => { try { localStorage.setItem(LS, JSON.stringify(st)); } catch (_) {} };
+        const st = load();
+
+        const populateTypes = () => {
+            typeSel.innerHTML = '';
+            for (const t of currentDeviceTypes) {
+                if (!t.outputs || t.outputs.length === 0) continue;
+                const o = document.createElement('option');
+                o.value = t.name; o.textContent = t.name;
+                typeSel.appendChild(o);
+            }
+            if (st.type && selectHasValue(typeSel, st.type)) typeSel.value = st.type;
+        };
+        const populateDevices = () => {
+            devSel.innerHTML = '<option value="">Default</option>';
+            const t = currentDeviceTypes.find(x => x.name === typeSel.value);
+            for (const name of (t && t.outputs ? t.outputs : [])) {
+                const o = document.createElement('option');
+                o.value = name; o.textContent = name;
+                devSel.appendChild(o);
+            }
+            if (st.device && selectHasValue(devSel, st.device)) devSel.value = st.device;
+        };
+        const gainLinear = () => dbToLinearGain(parseFloat(gain.value));
+        const refreshGainLabel = () => { gainLabel.textContent = parseFloat(gain.value).toFixed(1) + ' dB'; };
+        const applyBus = () => { try { api.setStreamBus(gameCb.checked, guitarCb.checked, gainLinear()); } catch (_) {} };
+        const applyDevice = async () => {
+            if (!enable.checked) { try { await api.clearStreamOutput(); } catch (_) {} statusEl.textContent = ''; return; }
+            statusEl.textContent = 'Opening stream output…';
+            try {
+                const err = await api.setStreamOutputDevice(typeSel.value, devSel.value);
+                statusEl.textContent = err ? ('Error: ' + err)
+                    : 'Stream output active — point OBS/Discord at this device.';
+                if (!err) applyBus();
+            } catch (e) { statusEl.textContent = 'Error: ' + (e && e.message ? e.message : String(e)); }
+        };
+
+        populateTypes();
+        populateDevices();
+        if (typeof st.game === 'boolean') gameCb.checked = st.game;
+        if (typeof st.guitar === 'boolean') guitarCb.checked = st.guitar;
+        if (typeof st.gain === 'number') gain.value = String(st.gain);
+        refreshGainLabel();
+        enable.checked = !!st.enabled;
+        config.style.display = enable.checked ? '' : 'none';
+        if (enable.checked) applyDevice();
+
+        enable.addEventListener('change', () => {
+            config.style.display = enable.checked ? '' : 'none';
+            st.enabled = enable.checked; save(); applyDevice();
+        });
+        typeSel.addEventListener('change', () => { st.type = typeSel.value; save(); populateDevices(); applyDevice(); });
+        devSel.addEventListener('change', () => { st.device = devSel.value; save(); applyDevice(); });
+        gameCb.addEventListener('change', () => { st.game = gameCb.checked; save(); applyBus(); });
+        guitarCb.addEventListener('change', () => { st.guitar = guitarCb.checked; save(); applyBus(); });
+        gain.addEventListener('input', () => { refreshGainLabel(); st.gain = parseFloat(gain.value); save(); applyBus(); });
     }
 
     // ── Signal Chain ──────────────────────────────────────────────────────────
@@ -1150,6 +1236,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 const outPct = toMeterPct(levels.outputLevel);
                 meterInput.style.width = inPct + '%';
                 meterOutput.style.width = outPct + '%';
+
+                // Stream-output meter (PR1): mirrors what OBS/Discord receives.
+                if (streamMeterEl && typeof api.getStreamSinkLevel === 'function') {
+                    try { streamMeterEl.style.width = toMeterPct(await api.getStreamSinkLevel()) + '%'; }
+                    catch (_) { /* ignore */ }
+                }
 
                 // Clipping indicator
                 meterInput.className = levels.inputLevel > 0.95

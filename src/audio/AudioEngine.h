@@ -216,6 +216,27 @@ public:
     float getBackingLevel() const { return currentBackingLevel.load(); }
     void resetPeaks();
 
+    // ── Streamer mix output (PR1: one stream bus → one extra output device) ───
+    // An ADDITIONAL output device carrying an independent submix (game/backing +
+    // the guitar monitor mix) for OBS/Discord capture, separate from the local
+    // monitor output. Default off → zero behaviour change. Control-thread only.
+    // setStreamOutputDevice returns "" on success or an error string.
+    juce::String setStreamOutputDevice(const juce::String& typeName, const juce::String& deviceName);
+    void clearStreamOutput();
+    bool isStreamOutputActive() const { return streamSink.active.load(std::memory_order_acquire); }
+    juce::String getStreamOutputDeviceName() const { return streamSink.desiredDeviceName; }
+    // Bus content: include the backing/game, include the guitar monitor mix, and a
+    // linear output gain. All atomic — safe to set live.
+    void setStreamBus(bool includeBacking, bool includeGuitar, float gain)
+    {
+        streamBusIncludeBacking.store(includeBacking, std::memory_order_relaxed);
+        streamBusIncludeGuitar.store(includeGuitar, std::memory_order_relaxed);
+        streamBusGain.store(gain, std::memory_order_relaxed);
+    }
+    void setStreamBusGain(float gain) { streamBusGain.store(gain, std::memory_order_relaxed); }
+    float getStreamSinkLevel() const { return streamSinkLevel.load(std::memory_order_relaxed); }
+    uint64_t getStreamUnderflowCount() const { return streamSink.underflowCount.load(std::memory_order_relaxed); }
+
     // Latency
     double getLatencyMs() const;
 
@@ -598,6 +619,67 @@ private:
     void packStereoIntoRing(const juce::AudioBuffer<float>& buf, int numSamples,
                             std::array<std::atomic<uint64_t>, kOutputRingFrames>& ring,
                             std::atomic<uint64_t>& writeIndex);
+
+    // ── Streamer mix output sink (PR1) ───────────────────────────────────────
+    // A second OUTPUT AudioDeviceManager on its OWN clock that drains a dedicated
+    // SPSC ring fed by the main output path's composed stream submix. This mirrors
+    // the InputDeviceSlot pattern INVERTED to the output side: the PRODUCER is the
+    // primary/output callback (composeAndPushStreamMix), the CONSUMER is this extra
+    // output device's callback (streamSinkCallback). Default off → no behaviour change.
+    struct StreamSinkCallback : juce::AudioIODeviceCallback
+    {
+        AudioEngine* engine = nullptr;
+        void audioDeviceIOCallbackWithContext(const float* const* inputData, int numInputChannels,
+                                              float* const* outputData, int numOutputChannels,
+                                              int numSamples,
+                                              const juce::AudioIODeviceCallbackContext&) override
+        {
+            juce::ignoreUnused(inputData, numInputChannels);
+            if (engine) engine->streamSinkCallback(outputData, numOutputChannels, numSamples);
+        }
+        void audioDeviceAboutToStart(juce::AudioIODevice* d) override { if (engine) engine->streamSinkAboutToStart(d); }
+        void audioDeviceStopped() override { if (engine) engine->streamSinkStopped(); }
+    };
+    struct StreamSink
+    {
+        juce::AudioDeviceManager manager;
+        StreamSinkCallback callback;
+        std::array<std::atomic<uint64_t>, kOutputRingFrames> ring{};
+        std::atomic<uint64_t> writeIndex{0};
+        std::atomic<uint64_t> readIndex{0};
+        std::atomic<uint64_t> underflowCount{0};
+        std::atomic<bool> active{false};
+        std::atomic<double> sampleRate{48000.0};
+        std::atomic<int> blockSize{256};
+        std::vector<float> pullScratchL, pullScratchR;  // sized in streamSinkAboutToStart
+        bool callbackRegistered = false;
+        bool initialised = false;
+        // Persistent INTENT (control thread only): the device the user chose.
+        // Survives a stop/restart so reopenDesiredStreamSink() can re-open it.
+        juce::String desiredTypeName;
+        juce::String desiredDeviceName;
+    };
+    StreamSink streamSink;
+    std::atomic<bool>  streamBusIncludeBacking{true};
+    std::atomic<bool>  streamBusIncludeGuitar{true};
+    std::atomic<float> streamBusGain{1.0f};
+    std::atomic<float> streamSinkLevel{0.0f};
+    // Producer-side scratch (written by the primary/output callback): the guitar
+    // monitor-mix snapshot (pre-backing) and the composed stream submix. Sized in
+    // audioDeviceAboutToStart / audioOutputAboutToStart alongside the other scratch.
+    juce::AudioBuffer<float> streamGuitarScratch;
+    juce::AudioBuffer<float> streamMixScratch;
+
+    void streamSinkCallback(float* const* outputData, int numOutputChannels, int numSamples);
+    void streamSinkAboutToStart(juce::AudioIODevice* device);
+    void streamSinkStopped();
+    void reopenDesiredStreamSink();
+    // Compose the stream submix from the captured guitar mix + the just-rendered
+    // backing block and pack it into the stream ring. Called from both output
+    // callbacks after backing render. `backingBuf` may be null (not playing).
+    void composeAndPushStreamMix(const juce::AudioBuffer<float>& guitarMix,
+                                 const juce::AudioBuffer<float>* backingBuf,
+                                 int backingFrames, float backingVol, int numSamples);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
