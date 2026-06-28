@@ -1373,6 +1373,14 @@ static Napi::Value GetStreamUnderflowCount(const Napi::CallbackInfo& info)
         (double) (liveEngine ? liveEngine->getStreamUnderflowCount() : 0ull));
 }
 
+// getStreamOverflowCount() -> number (consumer fell a full ring behind; frames dropped)
+static Napi::Value GetStreamOverflowCount(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Number::New(info.Env(),
+        (double) (liveEngine ? liveEngine->getStreamOverflowCount() : 0ull));
+}
+
 // setSourceInputChannel(sourceId, channel)
 static Napi::Value SetSourceInputChannel(const Napi::CallbackInfo& info)
 {
@@ -3227,6 +3235,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("getStreamSinkLevel", Napi::Function::New(env, GetStreamSinkLevel));
     exports.Set("isStreamOutputActive", Napi::Function::New(env, IsStreamOutputActive));
     exports.Set("getStreamUnderflowCount", Napi::Function::New(env, GetStreamUnderflowCount));
+    exports.Set("getStreamOverflowCount", Napi::Function::New(env, GetStreamOverflowCount));
     exports.Set("setSourceInputChannel", Napi::Function::New(env, SetSourceInputChannel));
     exports.Set("setSourceVerifierOffset", Napi::Function::New(env, SetSourceVerifierOffset));
     exports.Set("setSourceMonitorMute", Napi::Function::New(env, SetSourceMonitorMute));

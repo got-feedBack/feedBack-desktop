@@ -818,13 +818,18 @@ export function initAudioBridge(): void {
 
     ipcMain.handle('audio:setStreamBus', (_event, includeBacking: unknown, includeGuitar: unknown, gain: unknown) => {
         if (audio && typeof audio.setStreamBus === 'function') {
-            audio.setStreamBus(Boolean(includeBacking), Boolean(includeGuitar),
-                typeof gain === 'number' ? gain : 1.0);
+            // Require real booleans (don't Boolean()-coerce — that turns the string
+            // "false" into true) and a finite gain (native also clamps/finite-guards).
+            const ib = typeof includeBacking === 'boolean' ? includeBacking : true;
+            const ig = typeof includeGuitar === 'boolean' ? includeGuitar : true;
+            const g = typeof gain === 'number' && Number.isFinite(gain) ? gain : 1.0;
+            audio.setStreamBus(ib, ig, g);
         }
     });
 
     ipcMain.handle('audio:setStreamBusGain', (_event, gain: unknown) => {
-        if (audio && typeof audio.setStreamBusGain === 'function' && typeof gain === 'number') {
+        if (audio && typeof audio.setStreamBusGain === 'function'
+            && typeof gain === 'number' && Number.isFinite(gain)) {
             audio.setStreamBusGain(gain);
         }
     });
@@ -842,6 +847,11 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:getStreamUnderflowCount', () => {
         if (!audio || typeof audio.getStreamUnderflowCount !== 'function') return 0;
         return audio.getStreamUnderflowCount();
+    });
+
+    ipcMain.handle('audio:getStreamOverflowCount', () => {
+        if (!audio || typeof audio.getStreamOverflowCount !== 'function') return 0;
+        return audio.getStreamOverflowCount();
     });
 
     ipcMain.handle('audio:removeSource', (_event, id: unknown) => {

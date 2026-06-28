@@ -360,6 +360,7 @@ const feedBackDesktopApi = {
         getStreamSinkLevel: (): Promise<number> => ipcRenderer.invoke('audio:getStreamSinkLevel'),
         isStreamOutputActive: (): Promise<boolean> => ipcRenderer.invoke('audio:isStreamOutputActive'),
         getStreamUnderflowCount: (): Promise<number> => ipcRenderer.invoke('audio:getStreamUnderflowCount'),
+        getStreamOverflowCount: (): Promise<number> => ipcRenderer.invoke('audio:getStreamOverflowCount'),
         setSourceInputChannel: (id: number, channel: number): Promise<void> =>
             ipcRenderer.invoke('audio:setSourceInputChannel', id, channel),
         setSourceVerifierOffset: (id: number, seconds: number): Promise<void> =>

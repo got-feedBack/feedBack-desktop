@@ -1228,6 +1228,12 @@ void AudioEngine::stopAudio()
     // are bound — the single-device path is unchanged.
     for (int dk = 1; dk <= kMaxExtraInputDevices; ++dk)
         closeExtraInputDevice(dk - 1);
+    // Tear down the streamer-mix OUTPUT device too — KEEP its desired intent so the
+    // next startAudio() reopens it (same pattern as extra inputs). Without this the
+    // 2nd output device keeps running and underflowing while the engine is "stopped",
+    // and the destructor (which calls stopAudio()) would be the only path that ever
+    // closes it — closing the device here also makes that destructor teardown safe.
+    closeStreamSinkDevice();
     audioRunning.store(false, std::memory_order_relaxed);
     currentBackingLevel.store(0.0f);
 }
@@ -1743,9 +1749,15 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     if (sourceMonitorScratch.getNumSamples() < bs)
         sourceMonitorScratch.setSize(2, bs, false, false, true);
 
-    // Producer-side stream-mix scratch (duplex path runs here).
-    if (streamGuitarScratch.getNumSamples() < bs) streamGuitarScratch.setSize(2, bs, false, false, true);
-    if (streamMixScratch.getNumSamples() < bs)    streamMixScratch.setSize(2, bs, false, false, true);
+    // Producer-side stream-mix scratch (duplex path runs here). Sized to a FIXED
+    // capacity (>= the ring) rather than the live block size: in split mode the
+    // OUTPUT callback is the producer that uses these buffers while THIS (input)
+    // about-to-start can fire on a hotplug/resume — a block-size-driven realloc
+    // here would then free memory out from under the live producer. A one-time
+    // grow to kStreamScratchCap means same-or-smaller block restarts never realloc.
+    const int streamCap = juce::jmax(bs, (int) kOutputRingFrames);
+    if (streamGuitarScratch.getNumSamples() < streamCap) streamGuitarScratch.setSize(2, streamCap, false, false, true);
+    if (streamMixScratch.getNumSamples() < streamCap)    streamMixScratch.setSize(2, streamCap, false, false, true);
 
     // Prepare each ACTIVE PRIMARY-device source's DSP and reset its rings for a
     // clean cold start. Inactive pooled chains stay unprepared (no threads). EXTRA-
@@ -1825,9 +1837,12 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
     if ((int) outputPullScratchR.size() < bs) outputPullScratchR.assign((size_t) bs, 0.0f);
 
     // Producer-side stream-mix scratch (split path composes the stream submix in
-    // this output callback). Sized here too so either clock has it ready.
-    if (streamGuitarScratch.getNumSamples() < bs) streamGuitarScratch.setSize(2, bs, false, false, true);
-    if (streamMixScratch.getNumSamples() < bs)    streamMixScratch.setSize(2, bs, false, false, true);
+    // this output callback). Fixed capacity (>= the ring) so a same-or-smaller
+    // block restart on EITHER clock can't realloc these under a live producer — see
+    // the matching note in audioDeviceAboutToStart().
+    const int streamCap = juce::jmax(bs, (int) kOutputRingFrames);
+    if (streamGuitarScratch.getNumSamples() < streamCap) streamGuitarScratch.setSize(2, streamCap, false, false, true);
+    if (streamMixScratch.getNumSamples() < streamCap)    streamMixScratch.setSize(2, streamCap, false, false, true);
     // NOTE: outputBackingBuffer is sized by audioDeviceAboutToStart() from the
     // INPUT device's block size — it's the split-input DSP scratch, not an
     // output-side buffer. Don't touch it here: resizing from the output
@@ -1900,6 +1915,15 @@ void AudioEngine::composeAndPushStreamMix(const juce::AudioBuffer<float>& guitar
     if (! streamSink.active.load(std::memory_order_acquire)) return;
     // Undersized scratch (reconfig race) — skip this block rather than alloc on RT.
     if (streamMixScratch.getNumSamples() < numSamples) return;
+    // A block larger than the entire ring can't be published atomically (it would
+    // wrap and overwrite unread slots before writeIndex is bumped). Skip it and
+    // count an overflow. The split path already rejects oversized devices at setup;
+    // this guards the duplex path, whose block size we don't pre-validate.
+    if (numSamples > (int) kOutputRingFrames)
+    {
+        streamSink.overflowCount.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
     const bool  ig   = streamBusIncludeGuitar.load(std::memory_order_relaxed);
     const bool  ib   = streamBusIncludeBacking.load(std::memory_order_relaxed);
@@ -1947,6 +1971,7 @@ void AudioEngine::streamSinkCallback(float* const* outputData, int numOutputChan
     {
         r = w - kCap;
         streamSink.readIndex.store(r, std::memory_order_relaxed);
+        streamSink.overflowCount.fetch_add(1, std::memory_order_relaxed);
     }
     const uint64_t available   = w - r;
     const int      pullCount   = juce::jmin(outSamples, (int) available);
@@ -1979,10 +2004,19 @@ void AudioEngine::streamSinkAboutToStart(juce::AudioIODevice* device)
     streamSink.writeIndex.store(0, std::memory_order_relaxed);
     streamSink.readIndex.store(0, std::memory_order_relaxed);
     streamSink.underflowCount.store(0, std::memory_order_relaxed);
+    streamSink.overflowCount.store(0, std::memory_order_relaxed);
     for (auto& v : streamSink.ring) v.store(0, std::memory_order_relaxed);
 }
 
-void AudioEngine::streamSinkStopped() {}
+void AudioEngine::streamSinkStopped()
+{
+    // Fires on any stop of the stream device — an unplanned loss (unplug / driver
+    // reset) as well as our own teardown. Mark inactive so the producer stops
+    // filling a now-consumer-less ring and the meter clears; desiredTypeName/Name
+    // are deliberately left intact so reopenDesiredStreamSink() can restore it.
+    streamSink.active.store(false, std::memory_order_release);
+    streamSinkLevel.store(0.0f, std::memory_order_relaxed);
+}
 
 juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, const juce::String& deviceName)
 {
@@ -1993,6 +2027,24 @@ juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, co
     streamSink.desiredTypeName = typeName;
     streamSink.desiredDeviceName = deviceName;
 
+    // Stop the producer from writing the ring while we (re)configure the device:
+    // setAudioDeviceSetup() below drives streamSinkAboutToStart(), which resets the
+    // ring indices and slots — that must not race a concurrent composeAndPushStreamMix()
+    // on the main callback. The main callback observes active=false within one block,
+    // long before the device reopen completes; we only re-arm after a clean open.
+    streamSink.active.store(false, std::memory_order_release);
+
+    // Any failure below: detach/close the half-open device AND drop the desired
+    // intent. A deterministic failure (e.g. SR mismatch) is then NOT retried on every
+    // startAudio(), and the engine never reports active with no device behind it. The
+    // renderer keeps its own persisted choice and re-applies it, so nothing is lost.
+    auto fail = [this](const juce::String& msg) -> juce::String {
+        closeStreamSinkDevice();
+        streamSink.desiredTypeName = {};
+        streamSink.desiredDeviceName = {};
+        return msg;
+    };
+
     if (! streamSink.initialised)
     {
         streamSink.manager.initialise(0, 2, nullptr, false);
@@ -2002,7 +2054,7 @@ juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, co
     juce::AudioIODeviceType* outType = nullptr;
     for (auto* t : streamSink.manager.getAvailableDeviceTypes())
         if (t->getTypeName() == typeName) { outType = t; break; }
-    if (! outType) return "Stream output device type not found: " + typeName;
+    if (! outType) return fail("Stream output device type not found: " + typeName);
 
     try {
         if (auto* cur = streamSink.manager.getCurrentDeviceTypeObject())
@@ -2011,7 +2063,7 @@ juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, co
                 streamSink.manager.setCurrentAudioDeviceType(typeName, true);
         }
         else streamSink.manager.setCurrentAudioDeviceType(typeName, true);
-    } catch (...) { return "setCurrentAudioDeviceType threw for stream output type '" + typeName + "'"; }
+    } catch (...) { return fail("setCurrentAudioDeviceType threw for stream output type '" + typeName + "'"); }
 
     juce::String resolved = deviceName;
     if (resolved.isEmpty())
@@ -2032,20 +2084,17 @@ juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, co
 
     juce::String err;
     try { err = streamSink.manager.setAudioDeviceSetup(setup, true); }
-    catch (...) { return "stream output setAudioDeviceSetup threw"; }
-    if (err.isNotEmpty()) return "stream output setup: " + err;
+    catch (...) { return fail("stream output setAudioDeviceSetup threw"); }
+    if (err.isNotEmpty()) return fail("stream output setup: " + err);
 
     auto* dev = streamSink.manager.getCurrentAudioDevice();
-    if (! dev) return "no stream output device after setup";
+    if (! dev) return fail("no stream output device after setup");
     const double devSr = dev->getCurrentSampleRate();
     const double engineSr = currentSampleRate.load(std::memory_order_relaxed);
     if (engineSr > 0.0 && std::abs(devSr - engineSr) > 0.5)
-    {
-        try { streamSink.manager.closeAudioDevice(); } catch (...) {}
-        return "Stream output sample rate (" + juce::String(devSr)
+        return fail("Stream output sample rate (" + juce::String(devSr)
              + ") must match the engine rate (" + juce::String(engineSr)
-             + "). Pick a device that supports " + juce::String(engineSr) + " Hz.";
-    }
+             + "). Pick a device that supports " + juce::String(engineSr) + " Hz.");
 
     streamSink.callback.engine = this;
     if (! streamSink.callbackRegistered)
@@ -2059,11 +2108,14 @@ juce::String AudioEngine::setStreamOutputDevice(const juce::String& typeName, co
     return {};
 }
 
-void AudioEngine::clearStreamOutput()
+void AudioEngine::closeStreamSinkDevice()
 {
+    // Detach the drain callback and close the device, leaving desiredTypeName/Name
+    // intact so startAudio()/reopenDesiredStreamSink() can restore it. active=false
+    // first so the producer stops pushing; removeAudioCallback() then blocks until
+    // the consumer callback is no longer in flight, so the ring/device go quiescent
+    // before close. Idempotent — safe when nothing is open.
     streamSink.active.store(false, std::memory_order_release);
-    streamSink.desiredTypeName = {};
-    streamSink.desiredDeviceName = {};
     if (streamSink.callbackRegistered)
     {
         streamSink.manager.removeAudioCallback(&streamSink.callback);
@@ -2073,10 +2125,21 @@ void AudioEngine::clearStreamOutput()
     streamSinkLevel.store(0.0f, std::memory_order_relaxed);
 }
 
+void AudioEngine::clearStreamOutput()
+{
+    closeStreamSinkDevice();
+    streamSink.desiredTypeName = {};
+    streamSink.desiredDeviceName = {};
+}
+
 void AudioEngine::reopenDesiredStreamSink()
 {
-    if (streamSink.desiredDeviceName.isEmpty() && streamSink.desiredTypeName.isEmpty()) return;
-    const juce::String err = setStreamOutputDevice(streamSink.desiredTypeName, streamSink.desiredDeviceName);
+    // Copy the intent first: setStreamOutputDevice() mutates desiredTypeName/Name
+    // (and clears them on failure), so don't pass the members in by reference.
+    const juce::String t = streamSink.desiredTypeName;
+    const juce::String d = streamSink.desiredDeviceName;
+    if (d.isEmpty() && t.isEmpty()) return;
+    const juce::String err = setStreamOutputDevice(t, d);
     if (err.isNotEmpty())
         fprintf(stderr, "[AudioEngine] reopenDesiredStreamSink failed: %s\n", err.toRawUTF8());
 }
@@ -2845,13 +2908,17 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
         {
             currentBackingLevel.store(0.0f);
         }
-    }
 
-    // Stream sink: compose + push the stream submix before the local master gain.
-    if (streamActive)
-        composeAndPushStreamMix(streamGuitarScratch,
-                                streamBackingOn ? &backingBuffer : nullptr,
-                                streamBackingFrames, streamBackingVol, numSamples);
+        // Stream sink: compose + push the stream submix before the local master
+        // gain. Done INSIDE the backingLock scope so backingBuffer is read under the
+        // very lock that guards its resize (audio*AboutToStart) — matching the duplex
+        // path. When the tryLock failed (streamBackingOn=false) we pass a null backing
+        // pointer and never touch backingBuffer, so there is nothing to protect.
+        if (streamActive)
+            composeAndPushStreamMix(streamGuitarScratch,
+                                    streamBackingOn ? &backingBuffer : nullptr,
+                                    streamBackingFrames, streamBackingVol, numSamples);
+    }
 
     buffer.applyGain(outputGain.load());
 
