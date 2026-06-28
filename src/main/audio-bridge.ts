@@ -812,6 +812,61 @@ export function initAudioBridge(): void {
         }
     });
 
+    // ── Streamer mix output (PR1) ───────────────────────────────────────────
+    ipcMain.handle('audio:setStreamOutputDevice', (_event, typeName: unknown, deviceName: unknown) => {
+        if (!audio || typeof audio.setStreamOutputDevice !== 'function') return 'unsupported';
+        if (typeof typeName !== 'string' || typeof deviceName !== 'string') return 'invalid arguments';
+        try {
+            return audio.setStreamOutputDevice(typeName, deviceName);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`[audio] setStreamOutputDevice failed: ${msg}`);
+            return msg;
+        }
+    });
+
+    ipcMain.handle('audio:clearStreamOutput', () => {
+        if (audio && typeof audio.clearStreamOutput === 'function') audio.clearStreamOutput();
+    });
+
+    ipcMain.handle('audio:setStreamBus', (_event, includeBacking: unknown, includeGuitar: unknown, gain: unknown) => {
+        if (audio && typeof audio.setStreamBus === 'function') {
+            // Require real booleans (don't Boolean()-coerce — that turns the string
+            // "false" into true) and a finite gain (native also clamps/finite-guards).
+            const ib = typeof includeBacking === 'boolean' ? includeBacking : true;
+            const ig = typeof includeGuitar === 'boolean' ? includeGuitar : true;
+            const g = typeof gain === 'number' && Number.isFinite(gain) ? gain : 1.0;
+            audio.setStreamBus(ib, ig, g);
+        }
+    });
+
+    ipcMain.handle('audio:setStreamBusGain', (_event, gain: unknown) => {
+        if (audio && typeof audio.setStreamBusGain === 'function'
+            && typeof gain === 'number' && Number.isFinite(gain)) {
+            audio.setStreamBusGain(gain);
+        }
+    });
+
+    ipcMain.handle('audio:getStreamSinkLevel', () => {
+        if (!audio || typeof audio.getStreamSinkLevel !== 'function') return 0;
+        return audio.getStreamSinkLevel();
+    });
+
+    ipcMain.handle('audio:isStreamOutputActive', () => {
+        if (!audio || typeof audio.isStreamOutputActive !== 'function') return false;
+        return audio.isStreamOutputActive();
+    });
+
+    ipcMain.handle('audio:getStreamUnderflowCount', () => {
+        if (!audio || typeof audio.getStreamUnderflowCount !== 'function') return 0;
+        return audio.getStreamUnderflowCount();
+    });
+
+    ipcMain.handle('audio:getStreamOverflowCount', () => {
+        if (!audio || typeof audio.getStreamOverflowCount !== 'function') return 0;
+        return audio.getStreamOverflowCount();
+    });
+
     ipcMain.handle('audio:removeSource', (_event, id: unknown) => {
         if (!audio || typeof audio.removeSource !== 'function') return false;
         if (!validSourceId(id)) return false;

@@ -1318,6 +1318,79 @@ static Napi::Value UnbindInputDevice(const Napi::CallbackInfo& info)
     return Napi::Boolean::New(env, liveEngine->unbindInputDevice(info[0].As<Napi::Number>().Int32Value()));
 }
 
+// ── Streamer mix output (PR1) ───────────────────────────────────────────────
+// setStreamOutputDevice(typeName, deviceName) -> "" on success, else an error.
+static Napi::Value SetStreamOutputDevice(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine) return Napi::String::New(env, "no engine");
+    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString())
+        return Napi::String::New(env, "setStreamOutputDevice(typeName:string, deviceName:string)");
+    const std::string typeName = info[0].As<Napi::String>().Utf8Value();
+    const std::string devName  = info[1].As<Napi::String>().Utf8Value();
+    return Napi::String::New(env,
+        liveEngine->setStreamOutputDevice(juce::String(typeName), juce::String(devName)).toStdString());
+}
+
+// clearStreamOutput() -> undefined
+static Napi::Value ClearStreamOutput(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine) liveEngine->clearStreamOutput();
+    return info.Env().Undefined();
+}
+
+// setStreamBus(includeBacking:boolean, includeGuitar:boolean, gain:number)
+static Napi::Value SetStreamBus(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() >= 3 && info[0].IsBoolean() && info[1].IsBoolean() && info[2].IsNumber())
+        liveEngine->setStreamBus(info[0].As<Napi::Boolean>().Value(),
+                                 info[1].As<Napi::Boolean>().Value(),
+                                 (float) info[2].As<Napi::Number>().DoubleValue());
+    return info.Env().Undefined();
+}
+
+// setStreamBusGain(gain:number)
+static Napi::Value SetStreamBusGain(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() >= 1 && info[0].IsNumber())
+        liveEngine->setStreamBusGain((float) info[0].As<Napi::Number>().DoubleValue());
+    return info.Env().Undefined();
+}
+
+// getStreamSinkLevel() -> number (peak 0..1+)
+static Napi::Value GetStreamSinkLevel(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Number::New(info.Env(), liveEngine ? liveEngine->getStreamSinkLevel() : 0.0f);
+}
+
+// isStreamOutputActive() -> boolean
+static Napi::Value IsStreamOutputActive(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Boolean::New(info.Env(), liveEngine ? liveEngine->isStreamOutputActive() : false);
+}
+
+// getStreamUnderflowCount() -> number
+static Napi::Value GetStreamUnderflowCount(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Number::New(info.Env(),
+        (double) (liveEngine ? liveEngine->getStreamUnderflowCount() : 0ull));
+}
+
+// getStreamOverflowCount() -> number (consumer fell a full ring behind; frames dropped)
+static Napi::Value GetStreamOverflowCount(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Number::New(info.Env(),
+        (double) (liveEngine ? liveEngine->getStreamOverflowCount() : 0ull));
+}
+
 // setSourceInputChannel(sourceId, channel)
 static Napi::Value SetSourceInputChannel(const Napi::CallbackInfo& info)
 {
@@ -3166,6 +3239,14 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("listInputDevices", Napi::Function::New(env, ListInputDevices));
     exports.Set("bindInputDevice", Napi::Function::New(env, BindInputDevice));
     exports.Set("unbindInputDevice", Napi::Function::New(env, UnbindInputDevice));
+    exports.Set("setStreamOutputDevice", Napi::Function::New(env, SetStreamOutputDevice));
+    exports.Set("clearStreamOutput", Napi::Function::New(env, ClearStreamOutput));
+    exports.Set("setStreamBus", Napi::Function::New(env, SetStreamBus));
+    exports.Set("setStreamBusGain", Napi::Function::New(env, SetStreamBusGain));
+    exports.Set("getStreamSinkLevel", Napi::Function::New(env, GetStreamSinkLevel));
+    exports.Set("isStreamOutputActive", Napi::Function::New(env, IsStreamOutputActive));
+    exports.Set("getStreamUnderflowCount", Napi::Function::New(env, GetStreamUnderflowCount));
+    exports.Set("getStreamOverflowCount", Napi::Function::New(env, GetStreamOverflowCount));
     exports.Set("setSourceInputChannel", Napi::Function::New(env, SetSourceInputChannel));
     exports.Set("setSourceVerifierOffset", Napi::Function::New(env, SetSourceVerifierOffset));
     exports.Set("setSourceMonitorMute", Napi::Function::New(env, SetSourceMonitorMute));
