@@ -92,8 +92,32 @@ int main(int argc, char** argv)
     std::cout << "model loaded; isAvailable=" << det.isAvailable() << "\n";
 
     det.prepare((double) sampleRate, 256);
-    // The pipeline defaults OFF (the renderer arms it only when a consumer needs
-    // ML notes); arm it here so pushSamples feeds and the inference thread runs.
+
+    // Gate check: the pipeline defaults OFF. Feed the chord region (~1 s of
+    // audio that detects cleanly once armed) while still DISABLED and confirm
+    // the detector publishes nothing and never becomes ready — pushSamples must
+    // no-op and the inference thread must run no Run().
+    {
+        const int gateBlock = 256;
+        const size_t gateStart = (size_t) (3.6 * sampleRate);
+        const size_t gateEnd   = std::min(wav.size(), (size_t) (4.8 * sampleRate));
+        for (size_t i = gateStart; i < gateEnd; i += gateBlock)
+        {
+            const int n = (int) std::min<size_t>(gateBlock, gateEnd - i);
+            det.pushSamples(wav.data() + i, n);
+            std::this_thread::sleep_for(std::chrono::microseconds(
+                (long long) (1e6 * n / sampleRate)));
+            if (det.isReady() || ! det.getActiveNotes().empty())
+            {
+                std::cerr << "FAIL: detector active while disabled (gate leak)\n";
+                return 1;
+            }
+        }
+        std::cout << "gate OK: no detection while disabled\n";
+    }
+
+    // Arm it so pushSamples feeds and the inference thread runs. setEnabled(true)
+    // requests a thread-side cold-start reset before the first inference.
     det.setEnabled(true);
 
     // Feed the WAV in 256-sample blocks at ~real time so the background

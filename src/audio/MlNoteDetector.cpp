@@ -151,6 +151,15 @@ struct MlNoteDetector::Impl
     // so a silent home tuner — or an in-song verifier session — costs nothing.
     std::atomic<bool> enabled{ false };
 
+    // Requested by setEnabled(true): the INFERENCE THREAD clears the rolling
+    // window/FIFO/snapshot on its next wake before the first inference, giving a
+    // cold start on (re)arm instead of scoring against audio left over from a
+    // previous arm. The reset runs on the thread (never the N-API thread) so it
+    // can't race ingest(); pushSamples() no-ops while it's pending so the audio
+    // thread isn't writing the FIFO mid-reset. This preserves the invariant that
+    // clearAudioState() only runs when nothing else is touching the buffers.
+    std::atomic<bool> resetPending{ false };
+
     // Start / stop the background inference thread. prepare() and stop() use
     // these so the thread is never alive while clearAudioState() mutates the
     // FIFO / inQueue / circular buffer — otherwise a device stop→start cycle
@@ -159,6 +168,19 @@ struct MlNoteDetector::Impl
     {
         thread = std::make_unique<MlInferenceThread>([this]()
         {
+            // Cold-start reset requested by setEnabled(true) — runs here, on the
+            // thread that owns the buffers. Keep resetPending set THROUGH the
+            // reset (clear it only after) so pushSamples() stays gated off the
+            // FIFO for the whole drain, then release it.
+            if (resetPending.load(std::memory_order_acquire))
+            {
+                threadColdStart();
+                resetPending.store(false, std::memory_order_release);
+            }
+            // Master gate: when no consumer wants ML, run nothing — no ingest,
+            // no inference — so the thread sits idle instead of burning CPU.
+            if (! enabled.load(std::memory_order_acquire))
+                return;
             ingest();
             runInferenceIfDue();
         });
@@ -179,7 +201,11 @@ struct MlNoteDetector::Impl
         }
     }
 
-    void clearAudioState()
+    // Reset everything EXCEPT the FIFO. These fields are touched only by the
+    // inference thread (resampler/inQueue/circ/window counters) or under
+    // snapshotLock (the published snapshot), so this is safe to call either with
+    // the thread stopped (prepare/stop) or on the thread itself (cold re-arm).
+    void clearBuffersExceptFifo()
     {
         resampler.reset();
         inQueue.clear();
@@ -187,7 +213,6 @@ struct MlNoteDetector::Impl
         circWrite = 0;
         totalResampled = 0;
         sinceInference = 0;
-        fifo.reset();
         onsetTimeMs.fill(0.0);
         onsetSeq.fill(0);
         onsetConf.fill(0.0f);
@@ -205,6 +230,27 @@ struct MlNoteDetector::Impl
         // No snapshot has been published for this (re)start yet — the engine
         // routes to the YIN fallback via isReady() until the first inference.
         hasPublished.store(false, std::memory_order_relaxed);
+    }
+
+    // Full reset including fifo.reset(). fifo.reset() mutates BOTH FIFO indices
+    // and is NOT safe against a concurrent producer, so this must only be called
+    // with the audio callback quiescent: prepare()/stop() call it after
+    // stopThread() joins the inference thread, and the device is not streaming.
+    void clearAudioState()
+    {
+        fifo.reset();
+        clearBuffersExceptFifo();
+    }
+
+    // Cold re-arm on the inference thread. Cannot fifo.reset() here — the audio
+    // thread may still be producing — so DRAIN the FIFO instead (advancing only
+    // the read index, which is the consumer's own; safe SPSC against a
+    // concurrent pushSamples). pushSamples() also gates on resetPending while
+    // this runs, so in practice the producer is quiescent anyway.
+    void threadColdStart()
+    {
+        fifo.finishedRead(fifo.getNumReady());
+        clearBuffersExceptFifo();
     }
 
     // Drain the FIFO, resample to 22050 Hz, append to the rolling window.
@@ -244,8 +290,6 @@ struct MlNoteDetector::Impl
 
     void runInferenceIfDue()
     {
-        // Master gate: no consumer wants ML right now → burn no inference.
-        if (! enabled.load(std::memory_order_relaxed)) return;
         if (sinceInference < kHopSamples) return;
         if (totalResampled < (uint64_t) kAudioNSamples) return;  // window not full yet
         sinceInference = 0;
@@ -383,10 +427,13 @@ bool MlNoteDetector::isAvailable() const
 
 bool MlNoteDetector::isReady() const
 {
-    // Available AND has published at least one inference snapshot — the
-    // engine gates ML routing on this so the cold-start window after an
-    // audio start/restart uses the YIN/ChordScorer fallback.
+    // Available AND armed AND has published at least one inference snapshot.
+    // The engine gates ML routing on this, so: the cold-start window after an
+    // audio start/restart (or a re-arm) uses the YIN/ChordScorer fallback, and
+    // a suspended detector (enabled=false) routes to YIN rather than serving the
+    // stale snapshot left from its last arm.
     return isAvailable()
+        && impl->enabled.load(std::memory_order_acquire)
         && impl->hasPublished.load(std::memory_order_relaxed);
 }
 
@@ -466,20 +513,22 @@ void MlNoteDetector::stop()
 
 void MlNoteDetector::setEnabled(bool e)
 {
-    const bool was = impl->enabled.exchange(e, std::memory_order_acq_rel);
-    if (was == e) return;
-    if (! e)
+    if (impl->enabled.load(std::memory_order_relaxed) == e) return;  // dedup; no spurious re-arm
+    if (e)
     {
-        // Disarming: drop the rolling input and the published snapshot so a
-        // re-arm starts cold rather than scoring against stale audio, and so
-        // getActiveNotes()/isReady() report nothing while suspended. The
-        // inference thread stays alive but idle (its run loop early-returns),
-        // so a later re-arm needs no thread restart.
-        impl->clearAudioState();
+        // Arming. Drop readiness SYNCHRONOUSLY, BEFORE exposing enabled=true, so
+        // no reader (isReady() → DetectNotes/getActiveDetection) can observe the
+        // previous arm's snapshot during the cold-start window. isReady() loads
+        // enabled (acquire) before hasPublished, so seeing enabled=true here
+        // guarantees seeing hasPublished=false. Also request the thread-side
+        // buffer cold start (drains the FIFO + clears the window on the thread).
+        impl->hasPublished.store(false, std::memory_order_release);
+        impl->resetPending.store(true, std::memory_order_release);
     }
-    // Re-arm requires a fresh cold-start window before isReady() routes ML
-    // again; clearAudioState() already reset hasPublished, so callers keep
-    // getting the YIN fallback until the first new inference publishes.
+    // Publish the new state last (release). Disarming needs no buffer work: the
+    // thread sees !enabled on its next wake and idles, and isReady() gates on
+    // enabled so a suspended detector serves the YIN fallback, not a stale snapshot.
+    impl->enabled.store(e, std::memory_order_release);
 }
 
 bool MlNoteDetector::isEnabled() const
@@ -490,10 +539,13 @@ bool MlNoteDetector::isEnabled() const
 void MlNoteDetector::pushSamples(const float* data, int numSamples)
 {
     if (numSamples <= 0) return;
-    // Master gate (audio thread, relaxed atomic load — no lock, no allocation):
-    // when no consumer wants ML, don't even feed the FIFO. The inference thread
-    // also early-returns, so the whole pipeline is dormant until armed.
-    if (! impl->enabled.load(std::memory_order_relaxed)) return;
+    // Master gate (audio thread, relaxed atomic loads — no lock, no allocation):
+    // don't feed the FIFO when no consumer wants ML, nor while a thread-side
+    // cold-start reset is pending (the reset clears the FIFO — keep the audio
+    // thread off it until that's done). The inference thread also early-returns,
+    // so the whole pipeline is dormant until armed.
+    if (! impl->enabled.load(std::memory_order_relaxed)
+            || impl->resetPending.load(std::memory_order_relaxed)) return;
     // Lock-free write; if the FIFO is full (inference stalled) the oldest
     // unread samples are simply not overwritten — we drop the newest instead,
     // which never blocks or allocates on the audio thread.
