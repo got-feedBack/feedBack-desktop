@@ -92,6 +92,9 @@ int main(int argc, char** argv)
     std::cout << "model loaded; isAvailable=" << det.isAvailable() << "\n";
 
     det.prepare((double) sampleRate, 256);
+    // The pipeline defaults OFF (the renderer arms it only when a consumer needs
+    // ML notes); arm it here so pushSamples feeds and the inference thread runs.
+    det.setEnabled(true);
 
     // Feed the WAV in 256-sample blocks at ~real time so the background
     // inference thread drains the FIFO instead of overflowing it. The

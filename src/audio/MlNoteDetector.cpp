@@ -141,6 +141,16 @@ struct MlNoteDetector::Impl
     // than an ML scorer that would return all-misses until the window fills.
     std::atomic<bool> hasPublished{ false };
 
+    // Master gate. The ML pipeline is the single most expensive thing in the
+    // engine (~30 ms ONNX inference every hop), and on the default desktop path
+    // note detection is scored by the harmonic-comb NoteVerifier — nothing reads
+    // the ML detector. So it defaults OFF and the renderer arms it (via
+    // setNoteDetectionEnabled) only when a consumer actually needs it
+    // (native-frame detection / non-verifier fallback). When false the audio
+    // thread stops feeding pushSamples and the inference thread runs no Run(),
+    // so a silent home tuner — or an in-song verifier session — costs nothing.
+    std::atomic<bool> enabled{ false };
+
     // Start / stop the background inference thread. prepare() and stop() use
     // these so the thread is never alive while clearAudioState() mutates the
     // FIFO / inQueue / circular buffer — otherwise a device stop→start cycle
@@ -234,6 +244,8 @@ struct MlNoteDetector::Impl
 
     void runInferenceIfDue()
     {
+        // Master gate: no consumer wants ML right now → burn no inference.
+        if (! enabled.load(std::memory_order_relaxed)) return;
         if (sinceInference < kHopSamples) return;
         if (totalResampled < (uint64_t) kAudioNSamples) return;  // window not full yet
         sinceInference = 0;
@@ -452,9 +464,36 @@ void MlNoteDetector::stop()
     impl->clearAudioState();
 }
 
+void MlNoteDetector::setEnabled(bool e)
+{
+    const bool was = impl->enabled.exchange(e, std::memory_order_acq_rel);
+    if (was == e) return;
+    if (! e)
+    {
+        // Disarming: drop the rolling input and the published snapshot so a
+        // re-arm starts cold rather than scoring against stale audio, and so
+        // getActiveNotes()/isReady() report nothing while suspended. The
+        // inference thread stays alive but idle (its run loop early-returns),
+        // so a later re-arm needs no thread restart.
+        impl->clearAudioState();
+    }
+    // Re-arm requires a fresh cold-start window before isReady() routes ML
+    // again; clearAudioState() already reset hasPublished, so callers keep
+    // getting the YIN fallback until the first new inference publishes.
+}
+
+bool MlNoteDetector::isEnabled() const
+{
+    return impl->enabled.load(std::memory_order_relaxed);
+}
+
 void MlNoteDetector::pushSamples(const float* data, int numSamples)
 {
     if (numSamples <= 0) return;
+    // Master gate (audio thread, relaxed atomic load — no lock, no allocation):
+    // when no consumer wants ML, don't even feed the FIFO. The inference thread
+    // also early-returns, so the whole pipeline is dormant until armed.
+    if (! impl->enabled.load(std::memory_order_relaxed)) return;
     // Lock-free write; if the FIFO is full (inference stalled) the oldest
     // unread samples are simply not overwritten — we drop the newest instead,
     // which never blocks or allocates on the audio thread.
@@ -563,6 +602,8 @@ bool MlNoteDetector::isReady() const { return false; }
 bool MlNoteDetector::loadModel(const juce::File&) { return false; }
 void MlNoteDetector::prepare(double, int) {}
 void MlNoteDetector::stop() {}
+void MlNoteDetector::setEnabled(bool) {}
+bool MlNoteDetector::isEnabled() const { return false; }
 void MlNoteDetector::pushSamples(const float*, int) {}
 std::vector<MlNoteDetector::ActiveNote> MlNoteDetector::getActiveNotes() const { return {}; }
 MlNoteDetector::ActiveNote MlNoteDetector::getDominantNote() const { return {}; }

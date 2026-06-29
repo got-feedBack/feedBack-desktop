@@ -616,6 +616,20 @@ static Napi::Value SetMonitorMute(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+// setNoteDetectionEnabled(bool) -> undefined. Arms/suspends the polyphonic ML
+// note-detection pipeline across all sources. The renderer (note_detect) calls
+// this true only while a consumer actually reads ML notes (native-frame
+// detection / non-verifier fallback) and false otherwise — the default
+// harmonic-comb verifier path and the always-on home tuner leave ML suspended,
+// so the engine runs no ONNX inference when nothing needs it.
+static Napi::Value SetNoteDetectionEnabled(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() > 0)
+        liveEngine->setMlNoteDetectionEnabled(info[0].As<Napi::Boolean>().Value());
+    return info.Env().Undefined();
+}
+
 static Napi::Value SetMonitorMuteSuppressed(const Napi::CallbackInfo& info)
 {
     // IsBoolean()-guarded so a mismatched renderer build / manual caller
@@ -3167,6 +3181,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("getSampleRate", Napi::Function::New(env, GetSampleRate));
     exports.Set("loadNoteModel", Napi::Function::New(env, LoadNoteModel));
     exports.Set("isMlNoteDetection", Napi::Function::New(env, IsMlNoteDetection));
+    exports.Set("setNoteDetectionEnabled", Napi::Function::New(env, SetNoteDetectionEnabled));
     exports.Set("detectNotes", Napi::Function::New(env, DetectNotes));
 
     // VST scanning

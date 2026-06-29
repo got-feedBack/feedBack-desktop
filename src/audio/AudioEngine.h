@@ -30,6 +30,13 @@ public:
     PitchDetector& getPitchDetector() { return source0().getPitchDetector(); }
     MlNoteDetector& getMlNoteDetector() { return source0().getMlNoteDetector(); }
 
+    // Arm/suspend the ML note-detection pipeline across every source's detector.
+    // Defaults off; the renderer (note_detect) calls this true only while a
+    // consumer actually reads ML notes (native-frame detection / non-verifier
+    // fallback) and false otherwise, so the default harmonic-comb verifier path
+    // — and the always-on home tuner — never pay for ONNX inference. Main thread.
+    void setMlNoteDetectionEnabled(bool e);
+
     // Load the Basic Pitch ONNX model for the polyphonic ML detector. When a
     // model is loaded, getActiveDetection() / scoreChord() route through it;
     // otherwise they fall back to the YIN PitchDetector / ChordScorer.

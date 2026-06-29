@@ -279,6 +279,13 @@ const feedBackDesktopApi = {
         // fallback. Resolves false on a downlevel addon.
         isMlNoteDetection: (): Promise<boolean> => ipcRenderer.invoke('audio:isMlNoteDetection'),
 
+        // Arm/suspend the polyphonic ML note-detection pipeline. note_detect
+        // calls this true only when it will actually read ML notes; the default
+        // harmonic-comb verifier path leaves it false so a home tuner / verifier
+        // session runs no ONNX inference. No-op on a downlevel addon.
+        setNoteDetectionEnabled: (enabled: boolean): Promise<void> =>
+            ipcRenderer.invoke('audio:setNoteDetectionEnabled', enabled),
+
         // Current engine sample rate — needed by notedetect's chord
         // scorer to map FFT bins to Hz on the bridge path (no
         // AudioContext to read it from). Queried once at startAudio.

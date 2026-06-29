@@ -47,6 +47,18 @@ public:
     void prepare(double sampleRate, int blockSize);
     void stop();
 
+    // Master gate. Defaults OFF: the ML pipeline only runs inference (and only
+    // accepts pushSamples) while enabled. The renderer arms it via the
+    // setNoteDetectionEnabled bridge when a consumer actually needs ML notes
+    // (native-frame detection / non-verifier fallback); the default desktop path
+    // scores with the harmonic-comb NoteVerifier and leaves this off, so a home
+    // tuner — or an in-song verifier session — pays nothing for ML. Disabling
+    // clears the rolling window + published snapshot (cold re-arm); the inference
+    // thread stays alive but idle, so toggling needs no thread restart. Safe to
+    // call from the N-API/main thread; the audio thread reads the flag lock-free.
+    void setEnabled(bool e);
+    bool isEnabled() const;
+
     // Audio thread — lock-free, no allocation.
     void pushSamples(const float* data, int numSamples);
 

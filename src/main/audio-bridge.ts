@@ -642,6 +642,21 @@ export function initAudioBridge(): void {
         }
     });
 
+    // Arm/suspend the ML note-detection pipeline. note_detect calls this true
+    // only while a consumer actually reads ML notes (native-frame detection /
+    // non-verifier fallback) and false otherwise, so the default harmonic-comb
+    // verifier path and the always-on home tuner cost no ONNX inference.
+    // typeof-guarded so a downlevel addon (no gate) simply ignores it — ML then
+    // runs as before, i.e. fail-safe to current behaviour.
+    ipcMain.handle('audio:setNoteDetectionEnabled', (_event, enabled: boolean) => {
+        if (!audio || typeof audio.setNoteDetectionEnabled !== 'function') return;
+        try {
+            audio.setNoteDetectionEnabled(Boolean(enabled));
+        } catch (e) {
+            console.warn(`[audio] setNoteDetectionEnabled failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    });
+
     // ── Chord Scoring (polyphonic) ─────────────────────────────────────────
     // The notedetect plugin's chord-scoring branch hands us a chord
     // context — notes, arrangement, tuning offsets, thresholds — and

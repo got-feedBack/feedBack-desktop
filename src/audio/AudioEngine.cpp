@@ -1567,6 +1567,16 @@ SourceChain* AudioEngine::getSource(int id)
     return (id == 0 || src.isActive()) ? &src : nullptr;
 }
 
+void AudioEngine::setMlNoteDetectionEnabled(bool e)
+{
+    // Fan to every source in the fixed pool (not just active ones) so a source
+    // activated later inherits the current arm state instead of silently
+    // staying dormant. Each MlNoteDetector::setEnabled is a cheap atomic + a
+    // cold-state clear on a real transition.
+    for (int i = 0; i < kMaxSources; ++i)
+        sources[(size_t) i]->getMlNoteDetector().setEnabled(e);
+}
+
 std::vector<AudioEngine::SourceInfo> AudioEngine::listSources() const
 {
     std::vector<SourceInfo> out;
