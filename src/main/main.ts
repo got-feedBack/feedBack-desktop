@@ -210,6 +210,26 @@ if (process.platform === 'linux') {
     }
 }
 
+if (process.platform === 'win32') {
+    // Pin the WebGL/GPU process to the discrete (high-performance) adapter on
+    // hybrid-GPU machines. On Windows laptops with an Intel iGPU + NVIDIA/AMD
+    // dGPU, Chromium's GPU-process adapter selection is non-deterministic across
+    // launches — one run binds the iGPU, the next the dGPU. When it lands on the
+    // iGPU the 3D Highway's per-frame WebGL cost blows the draw budget and the
+    // load-adaptive resolution scaler (feedBack#654, static/highway.js
+    // _adaptRenderScale) silently drops the canvas to as low as quarter-res to
+    // hold the frame rate — so the highway renders pixelated even with the
+    // Quality selector pinned at HD, and which way it goes varies launch to
+    // launch. The renderer's `powerPreference: 'high-performance'` WebGL hint
+    // (plugins/highway_3d) is only advisory and does not reliably override the
+    // OS/Chromium adapter choice. This switch forces the high-performance GPU at
+    // the Chromium level so the fast path is consistent and the scaler rarely
+    // engages. Set before app.whenReady() so it's read during Chromium init.
+    // Desktop machines with a single GPU are unaffected (there's nothing to
+    // pick); on dual-GPU desktops it likewise selects the discrete card.
+    app.commandLine.appendSwitch('force_high_performance_gpu');
+}
+
 // Prevent error dialogs from showing when the Python subprocess has issues.
 // Both handlers log and swallow — don't let a stray rejection in one of the
 // subsystems tear the whole app down.
