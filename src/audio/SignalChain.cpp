@@ -421,6 +421,41 @@ void SignalChain::removeProcessor(int slotId)
     if (idx >= 0) slots.remove(idx);
 }
 
+bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProcessor> processor)
+{
+    if (!processor) return false;
+
+    // Prepare the incoming processor before it goes live, exactly as addProcessor
+    // does — under invokePlugin's SEH/signal guard so a fault in prepareToPlay is
+    // contained (the processor is dropped) rather than taking the app down.
+    ProcessorSlot staging;
+    staging.processor = std::move(processor);
+    invokePlugin(staging, [&](juce::AudioProcessor& p)
+    {
+        p.setPlayConfigDetails(2, 2, currentSampleRate, currentBlockSize);
+        p.prepareToPlay(currentSampleRate, currentBlockSize);
+    });
+    if (! staging.processor) return false;   // faulted during prepare → leave the slot as-is
+
+    std::unique_ptr<juce::AudioProcessor> old;
+    {
+        const juce::ScopedLock sl(lock);
+        const int idx = findSlotIndex(slotId);
+        if (idx < 0) return false;           // slot was removed underneath us
+        auto* slot = slots[idx];
+        old = std::move(slot->processor);
+        slot->processor = std::move(staging.processor);
+    }
+    // Tear the old processor down OUTSIDE the audio lock: releaseResources() (and
+    // a VST3 destructor) can block, and must never stall process() on it.
+    if (old)
+    {
+        old->releaseResources();
+        old.reset();
+    }
+    return true;
+}
+
 void SignalChain::moveProcessor(int fromIndex, int toIndex)
 {
     const juce::ScopedLock sl(lock);

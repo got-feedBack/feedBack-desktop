@@ -2696,8 +2696,78 @@ static Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
     {
         auto liveEngine = snapshotEngine();
         if (!liveEngine) return;
-        auto* slot = liveEngine->getSignalChain().getSlot(slotId);
+        auto& chain = liveEngine->getSignalChain();
+        auto* slot = chain.getSlot(slotId);
         if (!slot || !slot->processor) return;
+
+        // ── Windows editor-crash class fix ───────────────────────────────────
+        // An in-process VST3 editor is created on JUCE's BACKGROUND message
+        // thread (V8 owns the OS main thread inside a Node addon). On Windows a
+        // Qt-using / window-on-init plugin then faults via USER32->WndProc on
+        // WM_ACTIVATEAPP with NO host frame on the stack, so the SignalChain SEH
+        // guard can't catch it and the whole app dies (0xC0000005 / 0xC0000409).
+        // Fix: never open a VST3 editor in-process on Windows — promote the slot
+        // to the out-of-process sandbox (which hosts the editor on a real
+        // top-level message thread, the environment the plugin needs) and open
+        // it there. Compiled on every platform so the swap path keeps building;
+        // gated to Windows at runtime since the in-process editor is fine on
+        // macOS/Linux (no WndProc) and the sandbox hop is pure overhead there.
+        static constexpr bool kPromoteEditorToSandbox =
+           #if JUCE_WINDOWS
+            true;
+           #else
+            false;
+           #endif
+        if (kPromoteEditorToSandbox
+            && slot->type == ProcessorSlot::Type::VST
+            && slot->processor->hasEditor()
+            && dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()) == nullptr)
+        {
+            const juce::String path = slot->path;
+            fprintf(stderr, "[AudioEngine] editor-open: promoting in-process VST3 to sandbox: slot %d '%s'\n",
+                    slotId, path.toRawUTF8());
+
+            // Preserve the plugin's current state (knob positions) across the swap.
+            juce::MemoryBlock state;
+            slot->processor->getStateInformation(state);
+
+            juce::PluginDescription desc;
+            desc.fileOrIdentifier = path;
+            desc.name = juce::File(path).getFileNameWithoutExtension();
+
+            // Pin this plugin to the sandbox for the rest of the session so a
+            // later reload doesn't drop it back onto the crashing in-process path.
+            slopsmith::sandbox::addCrashedPlugin(path);
+
+            juce::String err;
+            auto sandboxed = slopsmith::sandbox::tryLoadSandboxed(
+                desc, chain.getCurrentSampleRate(), chain.getCurrentBlockSize(), err);
+            if (sandboxed)
+            {
+                if (state.getSize() > 0)
+                    sandboxed->setStateInformation(state.getData(), (int) state.getSize());
+                if (chain.replaceProcessor(slotId, std::move(sandboxed)))
+                {
+                    if (auto* slot2 = chain.getSlot(slotId))
+                        if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot2->processor.get()))
+                            sb->requestOpenEditor();
+                    fprintf(stderr, "[AudioEngine] editor-open: sandbox promotion OK for slot %d\n", slotId);
+                    return;
+                }
+                fprintf(stderr, "[AudioEngine] editor-open: replaceProcessor failed for slot %d\n", slotId);
+            }
+            else
+            {
+                fprintf(stderr, "[AudioEngine] editor-open: sandbox promotion failed for '%s': %s\n",
+                        path.toRawUTF8(), err.toRawUTF8());
+            }
+            // Promotion failed — do NOT fall through to the in-process editor
+            // (that is the crash path). The plugin keeps playing in-process.
+            return;
+        }
+
+        // In-process editor: non-VST3, editor-less, already-sandboxed, or POSIX
+        // (where the in-process editor is safe).
         auto* processor = slot->processor.get();
         auto name = slot->name;
         juce::AudioProcessorEditor* editor = nullptr;
