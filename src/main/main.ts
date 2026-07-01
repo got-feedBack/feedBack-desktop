@@ -124,6 +124,7 @@ import { initPluginManager } from './plugin-manager';
 import { initSoundfontManager, getDesktopConfig, setDesktopConfig } from './soundfont-manager';
 import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
+import { installAppMenu } from './app-menu';
 
 // Linux: enable Chromium's PipeWire capturer feature so getUserMedia can see
 // audio devices on PipeWire-only distros (Fedora 36+, recent Ubuntu, Arch).
@@ -1025,6 +1026,10 @@ async function startup(): Promise<void> {
 
     // Create the main window
     createWindow(port);
+
+    // Install our application menu (replaces Electron's default so View →
+    // Zoom In also accepts the unshifted Ctrl+= key — see app-menu.ts).
+    installAppMenu();
 
     // Register file picker IPC
     ipcMain.handle('dialog:pickFile', async (_event, filters?: { name: string; extensions: string[] }[]) => {
