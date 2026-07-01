@@ -2644,22 +2644,26 @@ static void destroyAllPluginEditorWindowsOnMessageThread()
 }
 
 // See the forward declaration above ClearChain for why this exists. Tears down
-// the in-process editor windows on the message thread and blocks the caller
-// until it completes, so editors are destroyed before the caller frees the
-// processors those editors point at. Clearing an empty map is cheap, so calling
-// this on every teardown is fine even when no editor is open.
+// the in-process editor windows so they are destroyed before the caller frees
+// the processors those editors point at. Clearing an empty map is cheap, so
+// calling this on every teardown is fine even when no editor is open.
 //
-// We do NOT reuse dispatchOnMessageThread() here: under JUCE_MAC it runs the
-// body inline on the CALLER, which for a libuv worker (LoadPresetWorker) would
-// destroy DocumentWindows off the message thread. Instead we branch on the
-// caller's actual thread: run inline only when already on the message thread
-// (doShutdown; ClearChain on macOS, where Node's main thread IS the JUCE
-// message thread) — posting-and-waiting on ourselves would deadlock — and
-// otherwise post via MessageManager::callAsync (correct on every platform:
-// drained by the dedicated JUCE thread on Linux/Windows and by the Node-main-
-// thread libuv timer on macOS) and wait. A refused post or a wait timeout can't
-// be recovered from here, but we log it so a lingering-editor UAF stays
-// diagnosable rather than being silently assumed away.
+// The threading is platform-split, matching loadVstSandboxAware()'s handling of
+// the same "run on the message thread from a worker" problem:
+//   - If already on the message thread (doShutdown; ClearChain on macOS, where
+//     Node's main thread IS the JUCE message thread), tear down inline —
+//     posting-and-waiting on ourselves would deadlock.
+//   - Linux/Windows, off the message thread (ClearChain on the Node thread,
+//     LoadPresetWorker on a libuv worker): post to the DEDICATED JUCE message
+//     thread and block until the editors are gone. Report a refused post / wait
+//     timeout so a lingering-editor UAF stays diagnosable.
+//   - macOS, off the message thread (LoadPresetWorker on a libuv worker): there
+//     is NO separate message-thread pump, so a callAsync + wait would stall
+//     until the 15s timeout (see the JUCE_MAC note in loadVstSandboxAware). Tear
+//     down inline instead — the established macOS worker-thread limitation. In
+//     practice editorWindows is empty on macOS (in-process editors route to the
+//     sandbox child, not a host-side PluginEditorWindow), so this is a no-op;
+//     the editor/processor UAF this targets is Windows-specific.
 static void closeAllPluginEditorWindows()
 {
     auto* mm = juce::MessageManager::getInstanceWithoutCreating();
@@ -2669,6 +2673,12 @@ static void closeAllPluginEditorWindows()
         return;
     }
 
+#if JUCE_MAC
+    // Off-thread on macOS: clear inline (see comment). Not the asserting helper —
+    // this path deliberately runs off the message thread under the pre-existing
+    // macOS constraint.
+    editorWindows.clear();
+#else
     auto done = std::make_shared<juce::WaitableEvent>();
     const bool posted = juce::MessageManager::callAsync([done]()
     {
@@ -2684,6 +2694,7 @@ static void closeAllPluginEditorWindows()
     if (!done->wait(15000))
         fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: editor teardown did not complete "
                         "within 15s; proceeding\n");
+#endif
 }
 
 static Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
