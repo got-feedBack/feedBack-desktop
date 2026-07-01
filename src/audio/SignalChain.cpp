@@ -287,6 +287,8 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
                 slotMidi.addEvent(drained[i].msg, 0);
         invokePlugin(*slot, [&](juce::AudioProcessor& p) { p.processBlock(buf, slotMidi); });
         applyPan(buf, numSamples, slot->pan);
+        if (slot->postGain != 1.0f)
+            buf.applyGain(0, numSamples, slot->postGain);
     };
 
     // Fast path: no parallel branch → plain serial chain. Behaviour is unchanged
@@ -453,6 +455,13 @@ void SignalChain::setPan(int slotId, float pan)
     const juce::ScopedLock sl(lock);
     int idx = findSlotIndex(slotId);
     if (idx >= 0) slots[idx]->pan = juce::jlimit(-1.0f, 1.0f, pan);
+}
+
+void SignalChain::setPostGain(int slotId, float gain)
+{
+    const juce::ScopedLock sl(lock);
+    int idx = findSlotIndex(slotId);
+    if (idx >= 0) slots[idx]->postGain = juce::jlimit(0.0f, 16.0f, gain);
 }
 
 void SignalChain::setBranch(int slotId, int branch)

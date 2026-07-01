@@ -1100,6 +1100,9 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:setBranch', (_event, slotId: number, branch: number) => {
         audio?.setBranch?.(slotId, branch);
     });
+    ipcMain.handle('audio:setPostGain', (_event, slotId: number, gain: number) => {
+        audio?.setPostGain?.(slotId, gain);
+    });
     ipcMain.handle('audio:setBranchSrc', (_event, slotId: number, src: number) => {
         audio?.setBranchSrc?.(slotId, src);
     });

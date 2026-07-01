@@ -30,6 +30,9 @@ struct ProcessorSlot
     float pan = 0.0f;
     int branch = 0;
     int branchSrc = 0;
+    // Linear output gain applied right after the processor (and pan). Carries
+    // the per-amp loudness trim / per-branch level; 1.0 (default) = no-op.
+    float postGain = 1.0f;
 
     // For VST plugins — their state as base64 for preset save/load
     juce::MemoryBlock getState() const;
@@ -60,6 +63,7 @@ public:
     void setPan(int slotId, float pan);
     void setBranch(int slotId, int branch);
     void setBranchSrc(int slotId, int src);
+    void setPostGain(int slotId, float gain);
     void clear();
 
     // Info
