@@ -170,6 +170,13 @@ static void dispatchOnMessageThread(Func&& func)
 #endif
 }
 
+// Destroys every in-process plugin editor window. MUST be called on the message
+// thread (editorWindows holds JUCE GUI objects). Defined far below, after the
+// editorWindows map; forward-declared here so doShutdown — which already runs on
+// the message thread — can tear editors down before engine.reset() frees the
+// processors those editors point at (use-after-free; feedBack-desktop#56).
+static void destroyAllPluginEditorWindowsOnMessageThread();
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 static Napi::Value Init(const Napi::CallbackInfo& info)
@@ -243,6 +250,12 @@ static void doShutdown()
     if (juceRunning.load() || snapshotEngine() || snapshotVstHost())
     {
         dispatchOnMessageThread([]() {
+            // Editors reference their slot's processor; engine.reset() below
+            // frees the whole chain, so destroy the editor windows first (#56).
+            // Already on the message thread here — call the inline variant
+            // rather than closeAllPluginEditorWindows() (which would post-and-
+            // wait on this very thread and deadlock).
+            destroyAllPluginEditorWindowsOnMessageThread();
             if (auto liveEngine = snapshotEngine())
                 liveEngine->stopAudio();
             {
@@ -2496,8 +2509,19 @@ static Napi::Value SetBypass(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+// Destroy every open in-process plugin editor window on the message thread and
+// block until done. MUST run before any path that frees slot processors
+// (ClearChain, LoadPreset's chain rebuild, engine teardown): an editor window
+// owns an AudioProcessorEditor bound to its slot's processor, so if the
+// processor is freed first the editor's next timer/paint callback dereferences
+// freed memory (use-after-free → DEP-execute crash seconds after pause;
+// feedBack-desktop#56). Defined below, after the editorWindows map.
+static void closeAllPluginEditorWindows();
+
 static Napi::Value ClearChain(const Napi::CallbackInfo& info)
 {
+    // Tear editors down before their processors are freed just below (#56).
+    closeAllPluginEditorWindows();
     if (auto liveEngine = snapshotEngine()) liveEngine->getSignalChain().clear();
     return info.Env().Undefined();
 }
@@ -2606,6 +2630,28 @@ public:
         setVisible(false);
     }
 };
+
+// Inline teardown: destroys every editor window. Caller MUST already be on the
+// message thread (this is enforced by convention, not asserted, to match the
+// surrounding code). Forward-declared near Init for doShutdown's use.
+static void destroyAllPluginEditorWindowsOnMessageThread()
+{
+    editorWindows.clear();
+}
+
+// See the forward declaration above ClearChain for why this exists.
+// editorWindows holds JUCE GUI objects, so we only touch them on the message
+// thread; dispatchOnMessageThread runs the teardown there and blocks the caller
+// until it completes — guaranteeing every AudioProcessorEditor is destroyed
+// before we return (and thus before the caller frees the processors those
+// editors point at). Clearing an empty map is cheap, so calling this on every
+// teardown is fine even when no editor is open. NOTE: callers already running
+// on the message thread must use destroyAllPluginEditorWindowsOnMessageThread()
+// directly — this variant would post-and-wait on itself and deadlock.
+static void closeAllPluginEditorWindows()
+{
+    dispatchOnMessageThread([]() { destroyAllPluginEditorWindowsOnMessageThread(); });
+}
 
 static Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
 {
@@ -2963,6 +3009,12 @@ public:
         auto* chainArray = chainVar.getArray();
         if (!chainArray) { success_ = false; error_ = "No chain array"; return; }
 
+        // Close any open in-process editor windows before clearing the chain —
+        // otherwise an editor outlives the processor it points at and faults on
+        // its next callback (use-after-free; #56). Runs on this AsyncWorker
+        // thread; dispatchOnMessageThread marshals to the message thread and
+        // blocks until the editors are gone.
+        closeAllPluginEditorWindows();
         // Clear existing chain
         liveEngine->getSignalChain().clear();
 
