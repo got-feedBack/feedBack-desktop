@@ -2648,22 +2648,19 @@ static void destroyAllPluginEditorWindowsOnMessageThread()
 // the processors those editors point at. Clearing an empty map is cheap, so
 // calling this on every teardown is fine even when no editor is open.
 //
-// The threading is platform-split, matching loadVstSandboxAware()'s handling of
-// the same "run on the message thread from a worker" problem:
-//   - If already on the message thread (doShutdown; ClearChain on macOS, where
-//     Node's main thread IS the JUCE message thread), tear down inline —
-//     posting-and-waiting on ourselves would deadlock.
-//   - Linux/Windows, off the message thread (ClearChain on the Node thread,
-//     LoadPresetWorker on a libuv worker): post to the DEDICATED JUCE message
-//     thread and block until the editors are gone. Report a refused post / wait
+// IMPORTANT: every caller runs on a MAIN-thread / message-thread context —
+// ClearChain and LoadPreset are N-API calls on the Node thread, doShutdown uses
+// the inline variant directly. This is NOT called from a libuv worker (that is
+// why LoadPreset closes editors before queuing LoadPresetWorker, rather than
+// letting the worker do it). Given that:
+//   - Already on the message thread (doShutdown; ClearChain / LoadPreset on
+//     macOS, where Node's main thread IS the JUCE message thread) → tear down
+//     inline; posting-and-waiting on ourselves would deadlock.
+//   - Otherwise (ClearChain / LoadPreset on Linux/Windows, where the JUCE
+//     message thread is a dedicated std::thread) → post to that thread and block
+//     until the editors are gone. Its 50ms dispatch loop drains this promptly,
+//     so there is no macOS-style stall here. Report a refused post / wait
 //     timeout so a lingering-editor UAF stays diagnosable.
-//   - macOS, off the message thread (LoadPresetWorker on a libuv worker): there
-//     is NO separate message-thread pump, so a callAsync + wait would stall
-//     until the 15s timeout (see the JUCE_MAC note in loadVstSandboxAware). Tear
-//     down inline instead — the established macOS worker-thread limitation. In
-//     practice editorWindows is empty on macOS (in-process editors route to the
-//     sandbox child, not a host-side PluginEditorWindow), so this is a no-op;
-//     the editor/processor UAF this targets is Windows-specific.
 static void closeAllPluginEditorWindows()
 {
     auto* mm = juce::MessageManager::getInstanceWithoutCreating();
@@ -2673,12 +2670,6 @@ static void closeAllPluginEditorWindows()
         return;
     }
 
-#if JUCE_MAC
-    // Off-thread on macOS: clear inline (see comment). Not the asserting helper —
-    // this path deliberately runs off the message thread under the pre-existing
-    // macOS constraint.
-    editorWindows.clear();
-#else
     auto done = std::make_shared<juce::WaitableEvent>();
     const bool posted = juce::MessageManager::callAsync([done]()
     {
@@ -2694,7 +2685,6 @@ static void closeAllPluginEditorWindows()
     if (!done->wait(15000))
         fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: editor teardown did not complete "
                         "within 15s; proceeding\n");
-#endif
 }
 
 static Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
@@ -3053,12 +3043,13 @@ public:
         auto* chainArray = chainVar.getArray();
         if (!chainArray) { success_ = false; error_ = "No chain array"; return; }
 
-        // Close any open in-process editor windows before clearing the chain —
-        // otherwise an editor outlives the processor it points at and faults on
-        // its next callback (use-after-free; #56). Runs on this AsyncWorker
-        // thread; dispatchOnMessageThread marshals to the message thread and
-        // blocks until the editors are gone.
-        closeAllPluginEditorWindows();
+        // NB: any open in-process editor windows were already torn down on the
+        // message thread by LoadPreset() before this AsyncWorker was queued (see
+        // there) — so clearing the chain here can't leave an editor pointing at
+        // a freed processor (use-after-free; #56). We deliberately do NOT tear
+        // editors down from this worker thread: JUCE GUI objects must only be
+        // destroyed on the message thread, and macOS has no pump to marshal to
+        // from here.
         // Clear existing chain
         liveEngine->getSignalChain().clear();
 
@@ -3185,6 +3176,15 @@ static Napi::Value LoadPreset(const Napi::CallbackInfo& info)
         deferred.Resolve(obj);
         return deferred.Promise();
     }
+
+    // Tear down any open in-process editor windows NOW, on the N-API/main
+    // thread, before the AsyncWorker frees the chain's processors on a libuv
+    // worker (#56). Doing it here — not inside LoadPresetWorker::Execute — keeps
+    // JUCE GUI teardown off the worker thread: on macOS this thread IS the
+    // message thread (inline teardown); on Linux/Windows closeAllPluginEditor-
+    // Windows() posts to the dedicated JUCE message thread and blocks. Either
+    // way editors are destroyed before Execute() clears the chain.
+    closeAllPluginEditorWindows();
 
     auto json = info[0].As<Napi::String>().Utf8Value();
     auto worker = new LoadPresetWorker(env, deferred, json);
