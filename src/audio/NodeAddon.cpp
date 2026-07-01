@@ -253,8 +253,8 @@ static void doShutdown()
             // Editors reference their slot's processor; engine.reset() below
             // frees the whole chain, so destroy the editor windows first (#56).
             // Already on the message thread here — call the inline variant
-            // rather than closeAllPluginEditorWindows() (which would post-and-
-            // wait on this very thread and deadlock).
+            // directly (closeAllPluginEditorWindows() would reach the same code
+            // via its message-thread branch; this just skips the thread check).
             destroyAllPluginEditorWindowsOnMessageThread();
             if (auto liveEngine = snapshotEngine())
                 liveEngine->stopAudio();
@@ -2632,25 +2632,58 @@ public:
 };
 
 // Inline teardown: destroys every editor window. Caller MUST already be on the
-// message thread (this is enforced by convention, not asserted, to match the
-// surrounding code). Forward-declared near Init for doShutdown's use.
+// message thread (editorWindows holds JUCE GUI objects). Forward-declared near
+// Init for doShutdown's use.
 static void destroyAllPluginEditorWindowsOnMessageThread()
 {
+    // Fails fast in assertion-enabled builds if a caller violates the
+    // precondition. Compiled out here under -DJUCE_DISABLE_ASSERTIONS, so it is
+    // documentation + a debug-build tripwire, never runtime cost.
+    JUCE_ASSERT_MESSAGE_THREAD
     editorWindows.clear();
 }
 
-// See the forward declaration above ClearChain for why this exists.
-// editorWindows holds JUCE GUI objects, so we only touch them on the message
-// thread; dispatchOnMessageThread runs the teardown there and blocks the caller
-// until it completes — guaranteeing every AudioProcessorEditor is destroyed
-// before we return (and thus before the caller frees the processors those
-// editors point at). Clearing an empty map is cheap, so calling this on every
-// teardown is fine even when no editor is open. NOTE: callers already running
-// on the message thread must use destroyAllPluginEditorWindowsOnMessageThread()
-// directly — this variant would post-and-wait on itself and deadlock.
+// See the forward declaration above ClearChain for why this exists. Tears down
+// the in-process editor windows on the message thread and blocks the caller
+// until it completes, so editors are destroyed before the caller frees the
+// processors those editors point at. Clearing an empty map is cheap, so calling
+// this on every teardown is fine even when no editor is open.
+//
+// We do NOT reuse dispatchOnMessageThread() here: under JUCE_MAC it runs the
+// body inline on the CALLER, which for a libuv worker (LoadPresetWorker) would
+// destroy DocumentWindows off the message thread. Instead we branch on the
+// caller's actual thread: run inline only when already on the message thread
+// (doShutdown; ClearChain on macOS, where Node's main thread IS the JUCE
+// message thread) — posting-and-waiting on ourselves would deadlock — and
+// otherwise post via MessageManager::callAsync (correct on every platform:
+// drained by the dedicated JUCE thread on Linux/Windows and by the Node-main-
+// thread libuv timer on macOS) and wait. A refused post or a wait timeout can't
+// be recovered from here, but we log it so a lingering-editor UAF stays
+// diagnosable rather than being silently assumed away.
 static void closeAllPluginEditorWindows()
 {
-    dispatchOnMessageThread([]() { destroyAllPluginEditorWindowsOnMessageThread(); });
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm != nullptr && mm->isThisTheMessageThread())
+    {
+        destroyAllPluginEditorWindowsOnMessageThread();
+        return;
+    }
+
+    auto done = std::make_shared<juce::WaitableEvent>();
+    const bool posted = juce::MessageManager::callAsync([done]()
+    {
+        destroyAllPluginEditorWindowsOnMessageThread();
+        done->signal();
+    });
+    if (!posted)
+    {
+        fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: message queue refused the post; "
+                        "editors may briefly outlive their processors\n");
+        return;
+    }
+    if (!done->wait(15000))
+        fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: editor teardown did not complete "
+                        "within 15s; proceeding\n");
 }
 
 static Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
