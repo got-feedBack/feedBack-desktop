@@ -163,8 +163,12 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-tutorials
 		got-feedback/feedback-plugin-update-manager
 		got-feedback/feedback-plugin-virtuoso
-		# Rig Builder (NAM tone builder) — repo is not under the feedback-plugin-* prefix.
-		got-feedback/rig_builder
+		# Rig Builder (NAM tone builder) — the repo was renamed
+		# feedBack-plugin-rig-builder (capital B, so the lowercase prefix
+		# strip doesn't apply; explicit dirname instead). The old
+		# `got-feedback/rig_builder` name only worked via a GitHub rename
+		# redirect, which silently breaks if a new repo ever takes that name.
+		got-feedback/feedBack-plugin-rig-builder:rig_builder
 	)
 
 	local total=0
