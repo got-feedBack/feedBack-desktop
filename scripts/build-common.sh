@@ -169,6 +169,11 @@ clone_slopsmith() {
 		# `got-feedback/rig_builder` name only worked via a GitHub rename
 		# redirect, which silently breaks if a new repo ever takes that name.
 		got-feedback/feedBack-plugin-rig-builder:rig_builder
+		# Camera Director (3D-highway free camera) — our fork of nimuart's plugin
+		# (v3 popover launcher + drum/piano support; PR upstream at
+		# nimuart/cameradirector_feedback#3). Repo isn't under the
+		# feedback-plugin-* prefix, so give an explicit dirname matching the id.
+		got-feedback/cameradirector_feedback:camera_director
 	)
 
 	local total=0
