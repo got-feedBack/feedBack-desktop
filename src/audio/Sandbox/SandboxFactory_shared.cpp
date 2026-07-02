@@ -189,6 +189,35 @@ void addCrashedPlugin(const juce::String& pluginPath)
     }
 }
 
+bool isCrashedPlugin(const juce::String& pluginPath)
+{
+    if (pluginPath.isEmpty()) return false;
+    const auto canonical = juce::File(pluginPath).getFullPathName();
+    const std::lock_guard<std::mutex> lock(g_crashedPluginsMutex);
+    return g_crashedPlugins.contains(canonical, /*ignoreCase*/ true);
+}
+
+void removeCrashedPlugin(const juce::String& pluginPath)
+{
+    if (pluginPath.isEmpty()) return;
+    const auto canonical = juce::File(pluginPath).getFullPathName();
+    const std::lock_guard<std::mutex> lock(g_crashedPluginsMutex);
+    // Case-insensitive match, mirroring addCrashedPlugin/shouldSandbox's
+    // contains(..., ignoreCase=true). Iterate backwards to remove safely.
+    bool removed = false;
+    for (int i = g_crashedPlugins.size(); --i >= 0;)
+    {
+        if (g_crashedPlugins[i].equalsIgnoreCase(canonical))
+        {
+            g_crashedPlugins.remove(i);
+            removed = true;
+        }
+    }
+    if (removed)
+        VST_TRACE("removeCrashedPlugin: %s removed from runtime crash blocklist",
+                  canonical.toRawUTF8());
+}
+
 void setCrashedPlugins(const juce::StringArray& pluginPaths)
 {
     const std::lock_guard<std::mutex> lock(g_crashedPluginsMutex);

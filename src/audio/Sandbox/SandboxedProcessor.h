@@ -236,6 +236,18 @@ void setCrashedPlugins(const juce::StringArray& pluginPaths);
 // offending plugin to the out-of-process sandbox.
 void addCrashedPlugin(const juce::String& pluginPath);
 
+// Query whether a path is currently on the runtime crash blocklist (matched
+// case-insensitively, same as shouldSandbox). Lets a caller that pins a plugin
+// only for a transient operation know whether the entry was already present.
+bool isCrashedPlugin(const juce::String& pluginPath);
+
+// Remove one plugin path from the runtime crash blocklist (case-insensitive).
+// Companion to addCrashedPlugin for callers that pin a plugin to force a
+// sandbox load for a single operation (e.g. promoting an editor) and must undo
+// the pin if that operation fails — so a plugin that never actually crashed
+// isn't left permanently forced to the sandbox for the session.
+void removeCrashedPlugin(const juce::String& pluginPath);
+
 // Resolve the path to slopsmith-vst-host.exe (sits next to the audio addon
 // .node). Returns a non-existent File if it can't be located. Exposed so the
 // out-of-process VST scan path can spawn the same host binary as the sandbox.

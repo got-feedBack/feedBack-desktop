@@ -2718,52 +2718,79 @@ static Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
            #else
             false;
            #endif
-        if (kPromoteEditorToSandbox
-            && slot->type == ProcessorSlot::Type::VST
-            && slot->processor->hasEditor()
-            && dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()) == nullptr)
+        if (kPromoteEditorToSandbox)
         {
-            const juce::String path = slot->path;
-            fprintf(stderr, "[AudioEngine] editor-open: promoting in-process VST3 to sandbox: slot %d '%s'\n",
-                    slotId, path.toRawUTF8());
-
-            // Preserve the plugin's current state (knob positions) across the swap.
+            // Decide + snapshot state SAFELY. captureVstStateForPromotion runs
+            // hasEditor()/getStateInformation() under the audio lock and the SEH
+            // guard (see its contract), so they neither race process()'s
+            // processBlock nor fault the app — an UNguarded getStateInformation on
+            // the very plugins this promotion targets would reintroduce the editor
+            // crash on the message thread. It returns true only for a non-sandboxed
+            // in-process VST3 that actually has an editor.
             juce::MemoryBlock state;
-            slot->processor->getStateInformation(state);
-
-            juce::PluginDescription desc;
-            desc.fileOrIdentifier = path;
-            desc.name = juce::File(path).getFileNameWithoutExtension();
-
-            // Pin this plugin to the sandbox for the rest of the session so a
-            // later reload doesn't drop it back onto the crashing in-process path.
-            slopsmith::sandbox::addCrashedPlugin(path);
-
-            juce::String err;
-            auto sandboxed = slopsmith::sandbox::tryLoadSandboxed(
-                desc, chain.getCurrentSampleRate(), chain.getCurrentBlockSize(), err);
-            if (sandboxed)
+            if (chain.captureVstStateForPromotion(slotId, state))
             {
-                if (state.getSize() > 0)
-                    sandboxed->setStateInformation(state.getData(), (int) state.getSize());
-                if (chain.replaceProcessor(slotId, std::move(sandboxed)))
+                const juce::String path = slot->path;   // immutable; message-thread only
+                fprintf(stderr, "[AudioEngine] editor-open: promoting in-process VST3 to sandbox: slot %d '%s'\n",
+                        slotId, path.toRawUTF8());
+
+                juce::PluginDescription desc;
+                desc.fileOrIdentifier = path;
+                desc.name = juce::File(path).getFileNameWithoutExtension();
+
+                // tryLoadSandboxed only accepts a plugin that shouldSandbox()
+                // approves, so pin this path to the runtime sandbox list first.
+                // Remember whether it was ALREADY pinned: if the promotion fails
+                // we undo only OUR pin below, so a healthy, never-crashed plugin
+                // isn't left permanently forced to a sandbox that just proved
+                // unavailable (while a pre-existing/real blocklist entry stays).
+                const bool wasAlreadyPinned = slopsmith::sandbox::isCrashedPlugin(path);
+                slopsmith::sandbox::addCrashedPlugin(path);
+
+                bool promoted = false;
+                juce::String err;
+                auto sandboxed = slopsmith::sandbox::tryLoadSandboxed(
+                    desc, chain.getCurrentSampleRate(), chain.getCurrentBlockSize(), err);
+                if (sandboxed)
                 {
-                    if (auto* slot2 = chain.getSlot(slotId))
-                        if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot2->processor.get()))
-                            sb->requestOpenEditor();
-                    fprintf(stderr, "[AudioEngine] editor-open: sandbox promotion OK for slot %d\n", slotId);
-                    return;
+                    if (state.getSize() > 0)
+                        sandboxed->setStateInformation(state.getData(), (int) state.getSize());
+                    if (chain.replaceProcessor(slotId, std::move(sandboxed)))
+                    {
+                        promoted = true;
+                        bool editorOpened = false;
+                        if (auto* slot2 = chain.getSlot(slotId))
+                            if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot2->processor.get()))
+                                editorOpened = sb->requestOpenEditor();
+                        fprintf(stderr, "[AudioEngine] editor-open: sandbox promotion OK for slot %d (editor %s)\n",
+                                slotId, editorOpened ? "opened" : "FAILED to open");
+                    }
+                    else
+                    {
+                        fprintf(stderr, "[AudioEngine] editor-open: replaceProcessor failed for slot %d\n", slotId);
+                    }
                 }
-                fprintf(stderr, "[AudioEngine] editor-open: replaceProcessor failed for slot %d\n", slotId);
+                else
+                {
+                    fprintf(stderr, "[AudioEngine] editor-open: sandbox promotion failed for '%s': %s\n",
+                            path.toRawUTF8(), err.toRawUTF8());
+                }
+
+                // Undo our transient pin on failure so a plugin that never crashed
+                // isn't stranded on the (evidently unavailable) sandbox route.
+                if (! promoted && ! wasAlreadyPinned)
+                    slopsmith::sandbox::removeCrashedPlugin(path);
+
+                // Promoted or not, never fall through to the in-process editor on
+                // Windows — that is the WndProc/Qt crash path this branch exists
+                // to avoid.
+                return;
             }
-            else
-            {
-                fprintf(stderr, "[AudioEngine] editor-open: sandbox promotion failed for '%s': %s\n",
-                        path.toRawUTF8(), err.toRawUTF8());
-            }
-            // Promotion failed — do NOT fall through to the in-process editor
-            // (that is the crash path). The plugin keeps playing in-process.
-            return;
+            // Not promotable (non-VST / editor-less / already-sandboxed, or the
+            // guarded capture faulted and released the processor). Fall through to
+            // the in-process branch below, which is safe for all of those cases
+            // (an already-sandboxed slot opens its editor out-of-process; an
+            // editor-less or released processor simply opens no window).
         }
 
         // In-process editor: non-VST3, editor-less, already-sandboxed, or POSIX

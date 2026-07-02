@@ -61,6 +61,18 @@ public:
     // Returns false if the slot is gone or the incoming processor faulted in
     // prepareToPlay (in which case the existing processor is left untouched).
     bool replaceProcessor(int slotId, std::unique_ptr<juce::AudioProcessor> processor);
+    // Snapshot a slot's state for sandbox promotion, SAFELY. Runs hasEditor()
+    // and getStateInformation() under the audio lock (so they can't race
+    // process()'s processBlock on the same instance) and under the SEH/signal
+    // guard (so a plugin that faults during the snapshot is contained +
+    // blocklisted, not fatal — an unguarded getStateInformation on the very
+    // plugins this promotion targets would reintroduce the editor crash on the
+    // message thread). Returns true and fills `state` only for a non-sandboxed
+    // in-process VST3 slot that actually has an editor; returns false (leaving
+    // `state` empty) for a missing/non-VST/editor-less/already-sandboxed slot or
+    // if the guarded calls faulted (processor released). A false result means
+    // "not promotable" — the caller may safely open the editor in-process.
+    bool captureVstStateForPromotion(int slotId, juce::MemoryBlock& state);
     void moveProcessor(int fromIndex, int toIndex);
     void setBypass(int slotId, bool bypassed);
     void setMultiBypass(const juce::Array<std::pair<int, bool>>& changes);

@@ -384,6 +384,15 @@ void SignalChain::queueMidiMessage(int targetSlotId, const juce::MidiMessage& ms
     // If queue full, message silently dropped (acceptable for PC messages)
 }
 
+// Shared prepare sequence for a processor entering the live chain — used by
+// addProcessor and replaceProcessor so the channel config and prepare ordering
+// stay identical between them. Call from inside invokePlugin's fault guard.
+static void prepareForPlayback(juce::AudioProcessor& p, double sampleRate, int blockSize)
+{
+    p.setPlayConfigDetails(2, 2, sampleRate, blockSize);
+    p.prepareToPlay(sampleRate, blockSize);
+}
+
 int SignalChain::addProcessor(std::unique_ptr<juce::AudioProcessor> processor,
                                ProcessorSlot::Type type,
                                const juce::String& name,
@@ -403,8 +412,7 @@ int SignalChain::addProcessor(std::unique_ptr<juce::AudioProcessor> processor,
     // slot is dropped, rather than taking the app down.
     invokePlugin(*slot, [&](juce::AudioProcessor& p)
     {
-        p.setPlayConfigDetails(2, 2, currentSampleRate, currentBlockSize);
-        p.prepareToPlay(currentSampleRate, currentBlockSize);
+        prepareForPlayback(p, currentSampleRate, currentBlockSize);
     });
     if (! slot->processor) return -1;
 
@@ -425,15 +433,28 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
 {
     if (!processor) return false;
 
+    // Copy the target slot's identity (type/name/path) onto the staging slot
+    // BEFORE preparing, so if the incoming processor faults during prepareToPlay
+    // invokePlugin's catch blocklists the RIGHT plugin path (addProcessor sets
+    // these before its own prepare for the same reason). Without this the staging
+    // path is empty and the fault is recorded against "".
+    ProcessorSlot staging;
+    {
+        const juce::ScopedLock sl(lock);
+        const int idx = findSlotIndex(slotId);
+        if (idx < 0) return false;           // nothing to replace
+        staging.type = slots[idx]->type;
+        staging.name = slots[idx]->name;
+        staging.path = slots[idx]->path;
+    }
+
     // Prepare the incoming processor before it goes live, exactly as addProcessor
     // does — under invokePlugin's SEH/signal guard so a fault in prepareToPlay is
     // contained (the processor is dropped) rather than taking the app down.
-    ProcessorSlot staging;
     staging.processor = std::move(processor);
     invokePlugin(staging, [&](juce::AudioProcessor& p)
     {
-        p.setPlayConfigDetails(2, 2, currentSampleRate, currentBlockSize);
-        p.prepareToPlay(currentSampleRate, currentBlockSize);
+        prepareForPlayback(p, currentSampleRate, currentBlockSize);
     });
     if (! staging.processor) return false;   // faulted during prepare → leave the slot as-is
 
@@ -452,6 +473,43 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
     {
         old->releaseResources();
         old.reset();
+    }
+    return true;
+}
+
+bool SignalChain::captureVstStateForPromotion(int slotId, juce::MemoryBlock& state)
+{
+    // Hold the audio lock across the whole check+snapshot: hasEditor() and
+    // getStateInformation() are plugin calls on a LIVE processor, and process()
+    // runs processBlock on that same instance under this lock (ScopedTryLock, so
+    // it simply drops a block here rather than deadlocking). Doing the snapshot
+    // off-lock would be a data race with the audio thread.
+    const juce::ScopedLock sl(lock);
+    const int idx = findSlotIndex(slotId);
+    if (idx < 0) return false;
+    auto* slot = slots[idx];
+    if (! slot->processor) return false;
+    if (slot->type != ProcessorSlot::Type::VST) return false;
+    // Already out-of-process — nothing to promote (its editor path is safe).
+    if (dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()) != nullptr)
+        return false;
+
+    // Run the plugin calls under invokePlugin's SEH/signal guard: a plugin that
+    // faults in hasEditor()/getStateInformation() is contained + blocklisted +
+    // released (leaving slot->processor null), never fatal.
+    bool promotable = false;
+    invokePlugin(*slot, [&](juce::AudioProcessor& p)
+    {
+        if (! p.hasEditor()) return;   // editor-less VST3 → nothing to open
+        p.getStateInformation(state);
+        promotable = true;
+    });
+    // slot->processor is null iff the guarded call faulted (invokePlugin released
+    // it). Don't promote from a released slot; the empty `state` is discarded.
+    if (! promotable || slot->processor == nullptr)
+    {
+        state.reset();
+        return false;
     }
     return true;
 }
