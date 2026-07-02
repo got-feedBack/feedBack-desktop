@@ -125,6 +125,30 @@ target_compile_definitions(signalchain_fault_test PRIVATE
     JUCE_CHECK_MEMORY_LEAKS=0)
 add_test(NAME signalchain_fault_test COMMAND signalchain_fault_test)
 
+# --- per-slot postGain unit test (PR #58) ---
+# Drives a REAL SignalChain::process() with an identity in-process processor and
+# asserts postGain scales output (all channels), rejects NaN, and is serialized
+# by savePreset(). Same link set as signalchain_fault_test (SignalChain.cpp pulls
+# in the sandbox blocklist symbols via invokePlugin's fault path).
+add_executable(signalchain_postgain_test
+    signalchain_postgain_test.cpp
+    "${REPO_ROOT}/src/audio/SignalChain.cpp"
+    "${SANDBOX}/SandboxedProcessor.cpp"
+    "${SANDBOX}/SandboxFactory_shared.cpp" "${SANDBOX}/SandboxFactory_posix.cpp"
+    "${SANDBOX}/AudioChannel_shared.cpp"   "${SANDBOX}/AudioChannel_posix.cpp"
+    "${SANDBOX}/ControlChannel_shared.cpp" "${SANDBOX}/ControlChannel_posix.cpp"
+    "${SANDBOX}/SubprocessHandle_posix.cpp"
+    "${SANDBOX}/Protocol.cpp")
+target_include_directories(signalchain_postgain_test PRIVATE "${REPO_ROOT}/src/audio")
+target_link_libraries(signalchain_postgain_test PRIVATE
+    juce::juce_audio_basics juce::juce_audio_devices juce::juce_audio_formats
+    juce::juce_audio_processors juce::juce_core juce::juce_data_structures
+    juce::juce_dsp juce::juce_events)
+target_compile_definitions(signalchain_postgain_test PRIVATE
+    JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_STANDALONE_APPLICATION=0 JUCE_REPORT_APP_USAGE=0)
+add_test(NAME signalchain_postgain_test COMMAND signalchain_postgain_test)
+
 # Orphan-cleanup regression (issue #265): host crash → child must not orphan.
 # Linux-only — the driver's leak path + PR_SET_PDEATHSIG are JUCE_LINUX-gated;
 # on macOS the env var is a no-op so this would assert clean-shutdown, not the

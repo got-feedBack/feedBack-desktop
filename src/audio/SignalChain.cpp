@@ -1,5 +1,6 @@
 #include "SignalChain.h"
 #include "Sandbox/SandboxedProcessor.h"
+#include <cmath>   // std::isfinite (postGain sanitisation)
 
 #if ! JUCE_WINDOWS
  #include <csetjmp>
@@ -459,8 +460,13 @@ void SignalChain::setPan(int slotId, float pan)
 
 void SignalChain::setPostGain(int slotId, float gain)
 {
+    // Reject non-finite input: juce::jlimit passes NaN through unchanged (both
+    // of its comparisons are false for NaN), and a NaN gain would then multiply
+    // the slot buffer to NaN and poison the whole chain until the slot rebuilds.
+    if (! std::isfinite(gain)) return;
     const juce::ScopedLock sl(lock);
     int idx = findSlotIndex(slotId);
+    // Clamp to [0, 16] — a 0..+24 dB linear ceiling for the per-slot trim.
     if (idx >= 0) slots[idx]->postGain = juce::jlimit(0.0f, 16.0f, gain);
 }
 
@@ -590,6 +596,9 @@ juce::String SignalChain::savePreset() const
         if (slot->pan != 0.0f)       slotObj->setProperty("pan", slot->pan);
         if (slot->branch != 0)       slotObj->setProperty("branch", slot->branch);
         if (slot->branchSrc != 0)    slotObj->setProperty("branchSrc", slot->branchSrc);
+        // Per-slot output trim (loudness leveling). LoadPresetWorker reads this
+        // back, so it must be written here or a save/load round-trip drops it.
+        if (slot->postGain != 1.0f)  slotObj->setProperty("postGain", slot->postGain);
 
         // Save processor state as base64
         auto state = slot->getState();
