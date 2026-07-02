@@ -467,6 +467,11 @@ private:
     std::atomic<float> outputPeak{0.0f};
 
     // Backing track
+    // Read-ahead worker that fills the transport's buffer off the audio thread
+    // (see loadBackingTrack). Declared BEFORE backingTransport so it is destroyed
+    // AFTER it — the transport's BufferingAudioSource holds a pointer to this
+    // thread and must be torn down before the thread goes away.
+    juce::TimeSliceThread backingReadThread { "BackingReadAhead" };
     std::unique_ptr<juce::AudioFormatReaderSource> backingSource;
     std::unique_ptr<juce::AudioTransportSource> backingTransport;
     signalsmith::stretch::SignalsmithStretch<float> backingStretch;
