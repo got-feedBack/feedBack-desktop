@@ -64,13 +64,34 @@ rm -rf "$BUNDLE_DIR/static/art" "$BUNDLE_DIR/static/sloppak_cache"
 find "$BUNDLE_DIR/static" -maxdepth 1 -name 'audio_*.mp3' -delete
 
 # Builtin diagnostic sloppak — server._seed_builtin_diagnostic_sloppaks() copies
-# this into DLC_DIR/diagnostics-builtin/ on library scan startup.
-DIAG_SLOPPAK="$SLOPSMITH_DIR/docs/diagnostics/slopsmith-diagnostic-basic-guitar.sloppak"
+# this into DLC_DIR/diagnostics-builtin/ on library scan startup. The source path
+# must match server.py's _BUILTIN_DIAGNOSTIC_SOURCES (feedBack-*, not slopsmith-*).
+DIAG_SLOPPAK="$SLOPSMITH_DIR/docs/diagnostics/feedBack-diagnostic-basic-guitar.sloppak"
 if [ -f "$DIAG_SLOPPAK" ]; then
     mkdir -p "$BUNDLE_DIR/docs/diagnostics"
     cp "$DIAG_SLOPPAK" "$BUNDLE_DIR/docs/diagnostics/"
 else
     echo "WARNING: diagnostic sloppak not found at $DIAG_SLOPPAK — builtin seeding will skip in packaged builds" >&2
+fi
+
+# Builtin starter content — server._seed_builtin_starter_content() copies these
+# into DLC_DIR/starter/ once on first run so a fresh install ships a playable
+# library. Source path must match server.py's _BUILTIN_STARTER_SOURCES.
+STARTER_SRC="$SLOPSMITH_DIR/content/starter"
+if [ -d "$STARTER_SRC" ]; then
+    # Explicit no-match detection ([ -e ]) instead of relying on cp failing —
+    # so a real cp error (unreadable source, disk full) still aborts under
+    # `set -e` rather than being swallowed as "no starter feedpaks".
+    starter_paks=("$STARTER_SRC"/*.feedpak)
+    if [ -e "${starter_paks[0]:-}" ]; then
+        mkdir -p "$BUNDLE_DIR/content/starter"
+        cp "${starter_paks[@]}" "$BUNDLE_DIR/content/starter/"
+        echo "  Bundled starter content: ${#starter_paks[@]} feedpak(s)"
+    else
+        echo "WARNING: no starter feedpaks in $STARTER_SRC — starter seeding will skip in packaged builds" >&2
+    fi
+else
+    echo "WARNING: content/starter not found — starter seeding will skip in packaged builds" >&2
 fi
 
 # Cross-platform "cp -r minus .git" — Git Bash on Windows doesn't ship
