@@ -161,7 +161,6 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-themes
 		got-feedback/feedback-plugin-transpose-chords
 		got-feedback/feedback-plugin-tutorials
-		got-feedback/feedback-plugin-update-manager
 		got-feedback/feedback-plugin-virtuoso
 		# Rig Builder (NAM tone builder) — the repo was renamed
 		# feedBack-plugin-rig-builder (capital B, so the lowercase prefix
