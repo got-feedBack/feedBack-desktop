@@ -190,14 +190,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app=$(ls -d release/mac*/Slopsmith.app 2>/dev/null | head -n1 || true)
+          # The .app bundle is named after productName (e.g. fee[dB]ack.app),
+          # not the old "Slopsmith" name — find it dynamically so a rebrand
+          # can't break the tester zip.
+          app=$(ls -d release/mac*/*.app 2>/dev/null | head -n1 || true)
           if [[ -z "${app:-}" || ! -d "$app" ]]; then
-            echo "::error::No Slopsmith.app found under release/mac*/ — macOS build produced no bundle."
+            echo "::error::No .app bundle found under release/mac*/ — macOS build produced no bundle."
             exit 1
           fi
-          ditto -c -k --sequesterRsrc --keepParent "$app" "release/Slopsmith-macos-arm64.zip"
-          echo "Zipped $app -> release/Slopsmith-macos-arm64.zip"
-          ls -lh release/Slopsmith-macos-arm64.zip
+          name=$(basename "$app" .app)
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release/${name}-macos-arm64.zip"
+          echo "Zipped $app -> release/${name}-macos-arm64.zip"
+          ls -lh "release/${name}-macos-arm64.zip"
 
       # Velopack: derive update channel from tag name. Only runs for
       # tag pushes (refs/tags/v*) on win + mac — Linux still ships via
@@ -316,11 +320,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The launcher exe is named after productName (electron-builder
+          # 'dir' target), not the packId. Velopack otherwise looks for
+          # <packId>.exe and fails. Derive it from package.json so a rebrand
+          # can't break the pack.
+          mainexe="$(node -p "require('./package.json').build.productName").exe"
+          if [[ ! -f "release/win-unpacked/${mainexe}" ]]; then
+            echo "::error::Launcher release/win-unpacked/${mainexe} not found"; ls -1 release/win-unpacked/*.exe || true; exit 1
+          fi
           vpk pack \
             --packId Slopsmith \
             --packVersion "${{ steps.velopack_channel.outputs.version }}" \
             --channel "win-x64-${{ steps.velopack_channel.outputs.channel }}" \
             --packDir release/win-unpacked \
+            --mainExe "$mainexe" \
             --msi \
             --instLocation PerMachine \
             -o release/velopack
@@ -384,6 +397,16 @@ jobs:
           # would fail outright if handed an empty --notary* value. If any
           # is missing (forks, partial secret configs) fall back to an
           # unsigned pack, matching the all-four check in build-macos.sh.
+          # The .app bundle + its executable are named after productName
+          # (e.g. fee[dB]ack.app), not the packId — resolve them dynamically
+          # so a rebrand can't break the pack (Velopack otherwise looks for
+          # <packId>.app/Contents/MacOS/<packId> and fails).
+          app=$(ls -d release/mac-arm64/*.app 2>/dev/null | head -n1 || true)
+          if [[ -z "${app:-}" || ! -d "$app" ]]; then
+            echo "::error::No .app bundle in release/mac-arm64/"
+            exit 1
+          fi
+          mainexe=$(basename "$app" .app)
           if [[ -z "${APPLE_SIGNING_IDENTITY:-}" || -z "${APPLE_ID:-}" \
                 || -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" \
                 || -z "${APPLE_TEAM_ID:-}" ]]; then
@@ -392,7 +415,8 @@ jobs:
               --packId Slopsmith \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
-              --packDir release/mac-arm64/Slopsmith.app \
+              --packDir "$app" \
+              --mainExe "$mainexe" \
               -o release/velopack
           else
             # vpk notarizes through a notarytool *credential profile*, not
@@ -414,7 +438,8 @@ jobs:
               --packId Slopsmith \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
-              --packDir release/mac-arm64/Slopsmith.app \
+              --packDir "$app" \
+              --mainExe "$mainexe" \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
               --notaryProfile "velopack-notary"
