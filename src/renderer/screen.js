@@ -2376,17 +2376,21 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         try {
             await api.clearChain();
             // Clean any Rig Builder stages a pre-fix build baked into this saved
-            // preset (see aeIsRigBuilderStage). Guard: if stripping would empty a
-            // preset that actually had stages, load it unchanged rather than a
-            // silent empty chain.
-            let _nativeToLoad = aeStripRigBuilderFromNativePreset(preset.nativePreset);
+            // preset (see aeIsRigBuilderStage). A preset that empties completely
+            // was 100% Rig Builder's tone (saved while only RB stages were live)
+            // — loading it empty is CORRECT: that tone belongs to Rig Builder,
+            // which reloads it on its own schedule, and falling back to the
+            // polluted blob would resurrect RB stages into the manual chain.
+            // Empty-chain presets are a supported shape (see
+            // songShouldRebuildChain's loadability notes).
+            const _nativeToLoad = aeStripRigBuilderFromNativePreset(preset.nativePreset);
             try {
-                const before = JSON.parse(typeof preset.nativePreset === 'string' ? preset.nativePreset : JSON.stringify(preset.nativePreset || '{}'));
-                const after = JSON.parse(typeof _nativeToLoad === 'string' ? _nativeToLoad : JSON.stringify(_nativeToLoad || '{}'));
+                const before = JSON.parse(typeof preset.nativePreset === 'string' ? preset.nativePreset : '{}');
+                const after = JSON.parse(typeof _nativeToLoad === 'string' ? _nativeToLoad : '{}');
                 if (Array.isArray(before?.chain) && before.chain.length && Array.isArray(after?.chain) && after.chain.length === 0) {
-                    _nativeToLoad = preset.nativePreset;
+                    console.warn(tag + ': preset contained only Rig Builder stages — loading it as an empty chain.');
                 }
-            } catch (_) { _nativeToLoad = preset.nativePreset; }
+            } catch (_) { /* diagnostics only */ }
             const result = await api.loadPreset(_nativeToLoad);
             // Some JUCE bridges return {success:false} or bare false instead of throwing.
             if (result === false || (result && result.success === false)) {
