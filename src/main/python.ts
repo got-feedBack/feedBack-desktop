@@ -435,17 +435,24 @@ function getDLCDir(): string {
         } catch { /* ignore */ }
     }
 
-    // Common default locations
-    const home = process.env.HOME || process.env.USERPROFILE || '';
+    // Default library location. `feedback` is the current brand; the legacy
+    // `slopsmith` paths stay as fallbacks so existing installs that relied on
+    // the default keep pointing at their already-populated library.
+    // Resolve home via Electron (USERPROFILE on Windows, $HOME on Unix) rather
+    // than raw env — an empty/ MSYS-style env would otherwise make the mkdir
+    // below create the library relative to cwd or under the wrong home.
+    const home = app.getPath('home');
+    const preferred = path.join(home, '.local', 'share', 'feedback', 'library');
     const candidates = [
-        path.join(home, '.local', 'share', 'slopsmith', 'library'),
-        path.join(home, 'Music', 'Slopsmith'),
+        preferred,
+        path.join(home, '.local', 'share', 'slopsmith', 'library'), // legacy
+        path.join(home, 'Music', 'Slopsmith'),                      // legacy
     ];
     for (const dir of candidates) {
         if (fs.existsSync(dir)) return dir;
     }
 
-    return candidates[0]; // fallback even if not found
+    return preferred; // fresh install — nothing exists yet
 }
 
 export async function startPython(): Promise<void> {
@@ -490,6 +497,17 @@ export async function startPython(): Promise<void> {
     serverPort = await findPort(PREFERRED_PORT);
     const configDir = getConfigDir();
     const dlcDir = getDLCDir();
+    // Ensure the resolved library folder exists before the server starts. The
+    // Python side only seeds starter content (and scans) when DLC_DIR.is_dir()
+    // is true, and it can't bootstrap the folder itself (the seed's mkdir runs
+    // only after the dir already resolves). Creating it here makes a fresh
+    // install seed the bundled starter songs on its first scan instead of
+    // reporting "DLC folder not configured".
+    try {
+        fs.mkdirSync(dlcDir, { recursive: true });
+    } catch (err) {
+        console.warn(`[python] could not create DLC dir ${dlcDir}:`, err);
+    }
     const pluginsDir = getPluginsDir();
     const slopsmithPlugins = path.join(slopsmithDir, 'plugins');
 
