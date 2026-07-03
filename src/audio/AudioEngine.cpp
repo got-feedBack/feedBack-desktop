@@ -1283,13 +1283,22 @@ bool AudioEngine::loadBackingTrack(const juce::File& file)
 
     backingSource = std::make_unique<juce::AudioFormatReaderSource>(reader, true);
     backingTransport = std::make_unique<juce::AudioTransportSource>();
-    // Read-ahead on backingReadThread so the RT audio thread never touches the
-    // disk or the format codec. Previously this passed (…, 0, nullptr, …): with no
-    // read-ahead buffer the transport decoded the file synchronously inside
-    // getNextAudioBlock ON the audio callback, so any disk seek / decode spike
-    // (worst for compressed formats) blew the block budget → underruns heard as
-    // glitches or brief mutes while a song plays. 32768 source frames ≈ 0.68 s @
-    // 48k of look-ahead absorbs those spikes.
+    // Read-ahead on backingReadThread so the RT audio thread normally never
+    // touches the disk or the format codec. Previously this passed
+    // (…, 0, nullptr, …): with no read-ahead buffer the transport decoded the
+    // file synchronously inside getNextAudioBlock ON the audio callback, so any
+    // disk seek / decode spike (worst for compressed formats) blew the block
+    // budget → underruns heard as glitches or brief mutes while a song plays.
+    // 32768 source frames ≈ 0.68 s @ 48k of look-ahead absorbs those spikes.
+    //
+    // Known residual (accepted): juce::BufferingAudioSource is not fully
+    // RT-safe — readBufferSection() holds callbackLock across the decode of one
+    // refill chunk, and the callback's getNextAudioBlock() takes the same lock,
+    // so the RT thread can still block behind an in-flight chunk decode. The
+    // window is bounded (JUCE caps chunks at 2048 source frames) and only hit
+    // when a refill is mid-decode, vs. the old guaranteed full decode on every
+    // block; a truly lock-free ring would mean replacing the JUCE transport
+    // stack and isn't worth it here.
     // The 4th arg makes AudioTransportSource SRC the file to device rate.
     // Stretch always sees device-rate audio so that its presetDefault parameters match.
     constexpr int kBackingReadAheadSamples = 32768;
