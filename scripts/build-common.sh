@@ -130,7 +130,6 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-drum-highway-3d
 		got-feedback/feedback-plugin-drums
 		got-feedback/feedback-plugin-editor
-		got-feedback/feedback-plugin-find-more
 		got-feedback/feedback-plugin-flappy-bend
 		got-feedback/feedback-plugin-fretboard
 		got-feedback/feedback-plugin-guitar-theory
