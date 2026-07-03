@@ -127,7 +127,6 @@ clone_slopsmith() {
 	cd "$clone_dir/plugins"
 	local plugins=(
 		# Bundled plugins — all under the got-feedback org after the migration.
-		got-feedback/feedback-plugin-drum-highway-3d
 		got-feedback/feedback-plugin-drums
 		got-feedback/feedback-plugin-editor
 		got-feedback/feedback-plugin-flappy-bend
@@ -135,7 +134,6 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-guitar-theory
 		got-feedback/feedback-plugin-invert-highway
 		got-feedback/feedback-plugin-jumpingtab
-		got-feedback/feedback-plugin-keys-highway-3d
 		got-feedback/feedback-plugin-loosefolder:loose_folder
 		got-feedback/feedback-plugin-lyrics-karaoke
 		got-feedback/feedback-plugin-metronome
