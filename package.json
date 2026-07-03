@@ -1,6 +1,6 @@
 {
   "name": "slopsmith-desktop",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "fee[dB]ack desktop app with integrated audio engine, VST hosting, and amp modeling",
   "author": {
     "name": "Byron",
