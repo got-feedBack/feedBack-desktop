@@ -329,7 +329,7 @@ jobs:
             echo "::error::No .exe launcher in release/win-unpacked/"; ls -1 release/win-unpacked/ | head -20; exit 1
           fi
           vpk pack \
-            --packId Slopsmith \
+            --packId feedback \
             --packVersion "${{ steps.velopack_channel.outputs.version }}" \
             --channel "win-x64-${{ steps.velopack_channel.outputs.channel }}" \
             --packDir release/win-unpacked \
@@ -412,7 +412,7 @@ jobs:
                 || -z "${APPLE_TEAM_ID:-}" ]]; then
             echo "::warning::Apple signing/notarization secrets incomplete — packing macOS Velopack release UNSIGNED. Gatekeeper will block auto-updates on user machines."
             vpk pack \
-              --packId Slopsmith \
+              --packId feedback \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
               --packDir "$app" \
@@ -435,7 +435,7 @@ jobs:
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
               --team-id "$APPLE_TEAM_ID"
             vpk pack \
-              --packId Slopsmith \
+              --packId feedback \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
               --packDir "$app" \
