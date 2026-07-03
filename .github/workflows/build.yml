@@ -320,13 +320,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The launcher exe is named after productName (electron-builder
-          # 'dir' target), not the packId. Velopack otherwise looks for
-          # <packId>.exe and fails. Derive it from package.json so a rebrand
-          # can't break the pack.
-          mainexe="$(node -p "require('./package.json').build.productName").exe"
-          if [[ ! -f "release/win-unpacked/${mainexe}" ]]; then
-            echo "::error::Launcher release/win-unpacked/${mainexe} not found"; ls -1 release/win-unpacked/*.exe || true; exit 1
+          # The launcher exe is the electron-builder 'dir' output, whose name is
+          # the SANITIZED productName (e.g. fee[dB]ack -> feedback.exe), not the
+          # raw productName or the packId. Find it dynamically — there's a
+          # single .exe at the win-unpacked root.
+          mainexe=$(basename "$(ls release/win-unpacked/*.exe 2>/dev/null | head -n1)")
+          if [[ -z "${mainexe:-}" ]]; then
+            echo "::error::No .exe launcher in release/win-unpacked/"; ls -1 release/win-unpacked/ | head -20; exit 1
           fi
           vpk pack \
             --packId Slopsmith \
