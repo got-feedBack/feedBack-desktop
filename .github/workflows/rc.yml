@@ -1,28 +1,41 @@
-name: Nightly
+name: rc
 
-# Trunk-based: nightly always builds main — the release/v* branch discovery
-# from the old release-centric flow is gone (it pinned nightlies to the
-# highest release branch forever, even after it shipped). Stabilization
-# builds from release/** come from rc.yml instead.
+# Release-candidate desktop builds for stabilization: every push to a
+# release/** branch builds the app matrix and uploads rc-* artifacts.
+# Core's RC Docker images come from the core repo's own rc.yml; final
+# signed/notarized releases still come from release.yml on tag push.
 on:
-  schedule:
-    - cron: '0 2 * * *'
+  push:
+    branches: ['release/**']
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One build per branch at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: rc-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
       date: ${{ steps.date.outputs.date }}
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Get date
         id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-  # build-core removed: core's own nightly.yml already builds + pushes
-  # ghcr.io/got-feedback/feedback:nightly on the same 02:00 UTC cron, so this
-  # was duplicate/racing work. Core owns its image now.
+      - name: Derive version from branch name
+        id: version
+        run: |
+          # release/v0.3.0 -> 0.3.0 (tolerate a missing v prefix too)
+          version="${GITHUB_REF_NAME#release/}"
+          version="${version#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     needs: setup
@@ -66,9 +79,9 @@ jobs:
           python-version: ${{ steps.config.outputs.python }}
 
       # macOS: import signing cert so build-macos.sh can codesign the .app.
-      # The nightly .app is signed but not notarized — testers clear Gatekeeper with
-      #   xattr -dr com.apple.quarantine Slopsmith.app
-      # Same graceful fallback as release.yml: no-op when secrets are absent.
+      # RC builds are signed but not notarized (same as nightlies) — testers
+      # clear Gatekeeper with `xattr -dr com.apple.quarantine <app>.app`.
+      # Graceful fallback: no-op when secrets are absent.
       - name: Import Apple signing certificate
         if: matrix.platform == 'mac'
         env:
@@ -103,52 +116,47 @@ jobs:
           # build-common.sh can clone core + the bundled plugins.
           GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # No notarization for nightlies — testers use xattr -dr com.apple.quarantine
+          # No notarization for RC builds — testers use xattr -dr com.apple.quarantine
           CSC_FOR_PULL_REQUEST: "true"
 
-      - name: Setup upterm session
-        uses: owenthereal/action-upterm@v1
-        if: ${{ failure() }}
-        with:
-          wait-timeout-minutes: 5
-
-      # macOS: zip the .app for tester distribution (same as release.yml non-tag path).
+      # macOS: zip the .app for tester distribution (same as nightly.yml).
       - name: Zip macOS app
         if: matrix.platform == 'mac'
         shell: bash
         run: |
           set -euo pipefail
-          app=$(ls -d release/mac*/Slopsmith.app 2>/dev/null | head -n1 || true)
+          app=$(ls -d release/mac*/*.app 2>/dev/null | head -n1 || true)
           if [[ -z "${app:-}" || ! -d "$app" ]]; then
-            echo "::error::No Slopsmith.app found under release/mac*/"
+            echo "::error::No .app bundle found under release/mac*/"
             exit 1
           fi
-          ditto -c -k --sequesterRsrc --keepParent "$app" "release/Slopsmith-macos-arm64.zip"
-          echo "Zipped $app -> release/Slopsmith-macos-arm64.zip"
+          name=$(basename "$app" .app)
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release/${name}-macos-arm64.zip"
+          echo "Zipped $app -> release/${name}-macos-arm64.zip"
 
       # Windows: electron-builder's `dir` target leaves win-unpacked/ with no
-      # packaged installer (Velopack is skipped for nightlies). Zip the directory
-      # so testers can download and extract, then launch Slopsmith.exe directly.
+      # packaged installer (Velopack is skipped for RC builds). Zip the directory
+      # so testers can download and extract, then launch the app .exe directly.
       - name: Zip win-unpacked
         if: matrix.platform == 'win'
         shell: pwsh
         run: |
-          Compress-Archive -Path release\win-unpacked\* -DestinationPath release\Slopsmith-windows-x64.zip
-          Write-Host "Zipped win-unpacked -> release\Slopsmith-windows-x64.zip"
+          Compress-Archive -Path release\win-unpacked\* -DestinationPath release\feedback-windows-x64.zip
+          Write-Host "Zipped win-unpacked -> release\feedback-windows-x64.zip"
 
       - name: Clean up signing keychain
         if: always() && matrix.platform == 'mac'
         run: |
           security delete-keychain build.keychain 2>/dev/null || true
 
-      - name: Upload nightly artifacts
+      - name: Upload RC artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-${{ needs.setup.outputs.date }}-${{ matrix.platform }}-${{ matrix.arch }}
+          name: rc-${{ needs.setup.outputs.version }}-${{ needs.setup.outputs.date }}-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             release/*.AppImage
             release/*.deb
             release/*.zip
             build/Release/*.pdb
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
