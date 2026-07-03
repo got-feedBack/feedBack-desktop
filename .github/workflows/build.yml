@@ -177,14 +177,14 @@ jobs:
       # Tester builds (non-tag only): macOS is packaged for distribution by the
       # Velopack steps below, which run ONLY on tag pushes. On a plain push to
       # main or a manual workflow_dispatch, electron-builder's "dir" target
-      # leaves an unpackaged release/mac-*/Slopsmith.app that the artifact
+      # leaves an unpackaged release/mac-*/<productName>.app that the artifact
       # upload globs (AppImage/deb/exe/velopack) don't match — so testers got
       # no macOS build. Zip the .app with ditto (preserves the bundle's
       # internal symlinks + any signature/xattrs) so a tester-ready macOS
       # archive ships from ordinary CI runs without cutting a release tag.
       # Skipped on tags so it never races or duplicates the Velopack output.
       # The archive is unsigned/un-notarized — testers clear Gatekeeper with
-      #   xattr -dr com.apple.quarantine Slopsmith.app
+      #   xattr -dr com.apple.quarantine "fee[dB]ack.app"
       - name: Zip macOS app for tester distribution (non-tag)
         if: matrix.platform == 'mac' && !startsWith(github.ref, 'refs/tags/v')
         shell: bash
@@ -382,7 +382,7 @@ jobs:
       # path ending in .app as a prebuilt bundle. A non-.app folder
       # would instead trigger auto-bundle mode (which also needs
       # --icon). electron-builder's "dir" target writes the bundle to
-      # release/mac-arm64/Slopsmith.app on the arm64 runner.
+      # release/mac-arm64/<productName>.app on the arm64 runner.
       - name: Velopack pack (macOS)
         if: matrix.platform == 'mac' && steps.velopack_channel.outputs.channel != ''
         shell: bash
