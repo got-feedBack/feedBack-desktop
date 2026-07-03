@@ -965,12 +965,28 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const _ampSimsEnabled = await aeUseAmpSims();
         ampSimsCheckbox.checked = _ampSimsEnabled;
 
+        // Auto-load must only ever seed an EMPTY engine. The native chain lives
+        // in the Electron main process and survives renderer reloads, screen.js
+        // re-evaluations (host re-hydration after a backend restart), and
+        // splitscreen pop-out windows — while init() runs once per evaluation.
+        // The saved chain in localStorage mirrors the live chain, so restoring
+        // it on top of the surviving chain exactly duplicates every stage (two
+        // amp stages in series = the tester "chain duplicated after leaving the
+        // Audio menu" / "gain blown out" reports).
+        let _chainAlreadyLive = false;
+        try {
+            const _existing = await api.getChainState();
+            _chainAlreadyLive = Array.isArray(_existing) && _existing.length > 0;
+        } catch (_) { /* probe failed — treat as empty (cold-start behavior) */ }
+
         // Try the default preset first; only restore the saved chain if no default preset is
         // configured or the preset load fails (corrupted blob, missing VST, etc.). This avoids
         // redundant native load/unload when the preset immediately replaces the chain, while
         // ensuring a valid chain is always available as a fallback.
         let _defaultLoaded = false;
-        if (_ampSimsEnabled) {
+        if (_chainAlreadyLive) {
+            console.info('[audio-engine] Engine already has a live chain — skipping auto-load (re-evaluation guard).');
+        } else if (_ampSimsEnabled) {
             try {
                 _defaultLoaded = await loadDefaultPreset('app-init');
             } catch (e) {
@@ -979,7 +995,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         } else {
             console.info('[audio-engine] Amp sims opt-out — skipping saved tone-chain restore (own-rig monitoring).');
         }
-        if (_ampSimsEnabled && !_defaultLoaded) {
+        if (!_chainAlreadyLive && _ampSimsEnabled && !_defaultLoaded) {
             await aeRestoreSavedChain();
         }
 
@@ -1015,6 +1031,20 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             console.warn('[audio-engine] Corrupted slopsmith-signal-chain; starting empty:', e);
             savedChain = [];
         }
+        // Drop Rig Builder plumbing stages from legacy saves. Before
+        // saveChainStateFromChain learned to skip Rig-Builder-owned chains, a
+        // user chain action taken while Rig Builder's default tone was live
+        // persisted its wrap stages (unit-impulse trim IR, Final Leveler) into
+        // the saved chain; restoring those as plain processors resurrects a
+        // tone this panel never built. Rewrite the cleaned list back so the
+        // save self-heals.
+        const _cleaned = savedChain.filter((item) => !isRigBuilderChainStage(item));
+        if (_cleaned.length !== savedChain.length) {
+            console.info('[audio-engine] Dropped', savedChain.length - _cleaned.length,
+                'Rig Builder plumbing stage(s) from the saved chain.');
+            try { localStorage.setItem('slopsmith-signal-chain', JSON.stringify(_cleaned)); } catch (_) {}
+            savedChain = _cleaned;
+        }
         for (const item of savedChain) {
             try {
                 if (item.type === 'VST' && item.path) {
@@ -1031,7 +1061,24 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (savedChain.length > 0) await refreshChain();
     }
 
+    // Rig Builder plumbing markers. Its default-tone/preview wraps carry a
+    // 1-sample unit-impulse trim IR and an auto-appended "RB Final Leveler"
+    // stage — a chain containing either was built by the Rig Builder plugin,
+    // not by this panel.
+    const RB_PLUMBING_MARKER = /_rb_unit_impulse|RB Final Leveler/i;
+    function isRigBuilderChainStage(stage) {
+        return RB_PLUMBING_MARKER.test(String(stage?.path || ''))
+            || RB_PLUMBING_MARKER.test(String(stage?.name || ''));
+    }
+
     function saveChainStateFromChain(chain) {
+        // Never persist a Rig-Builder-owned chain. Rig Builder reloads its
+        // default tone into the engine on its own schedule (song stop, screen
+        // leave), so it is routinely the ambient live chain while the user is
+        // in this panel; snapshotting it here would make the saved chain
+        // resurrect Rig Builder's tone on the next restore. Keep the last
+        // panel-built chain instead.
+        if (Array.isArray(chain) && chain.some(isRigBuilderChainStage)) return;
         const typeMap = { 0: 'VST', 1: 'NAM', 2: 'IR' };
         const items = chain.filter(s => s.type === 0 || s.type === 1 || s.type === 2).map(s => ({
             type: typeMap[s.type] || 'VST',
@@ -1287,7 +1334,16 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     };
 
     window._aeOpenEditor = async (slotId) => {
-        await api.openPluginEditor(slotId);
+        const ok = await api.openPluginEditor(slotId);
+        // A false return means the slot id went stale — the chain was rebuilt
+        // (song stop/preset load clears + reloads, assigning new ids) while
+        // this list stayed on screen with the old ids baked into its buttons.
+        // Re-render so the buttons pick up the live ids instead of silently
+        // doing nothing ("Edit no longer opens the VST window").
+        if (ok === false) {
+            console.warn('[audio-engine] openPluginEditor rejected slot', slotId, '— refreshing chain (stale slot id?)');
+            await refreshChain();
+        }
     };
 
     // ── VST Browser ───────────────────────────────────────────────────────────
@@ -4143,7 +4199,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         renderToneAutomationSettings();
     }).catch(e => console.error('[audio-engine] init error:', e));
 
-    if (window.slopsmith?.on) {
+    // Install-once across re-evaluations (mirrors installToneSetupLifecycleHooks):
+    // without the guard each re-evaluation stacks another listener pair, so one
+    // song:ready would run N racing tone-mapping applies (each a clear+load
+    // that also closes every open VST editor window).
+    if (window.slopsmith?.on && !hookState.toneReapplyHooksInstalled) {
+        hookState.toneReapplyHooksInstalled = true;
         let _reapplyDebounceTimer = null;
         let _reapplyFollowupTimer = null;
         const scheduleReapply = () => {
