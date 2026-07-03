@@ -20,43 +20,9 @@ jobs:
         id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-  build-core:
-    needs: setup
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Clone core at main
-        env:
-          GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
-        run: |
-          git clone --depth 1 --branch main \
-            "https://x-access-token:${GH_CLONE_TOKEN}@github.com/got-feedback/feedback.git" core
-          echo "Cloned feedback core @ $(git -C core rev-parse --short HEAD) (main)"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: core
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/got-feedback/feedback:nightly
-            ghcr.io/got-feedback/feedback:nightly-${{ needs.setup.outputs.date }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+  # build-core removed: core's own nightly.yml already builds + pushes
+  # ghcr.io/got-feedback/feedback:nightly on the same 02:00 UTC cron, so this
+  # was duplicate/racing work. Core owns its image now.
 
   build:
     needs: setup
