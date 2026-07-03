@@ -177,27 +177,29 @@ jobs:
       # Tester builds (non-tag only): macOS is packaged for distribution by the
       # Velopack steps below, which run ONLY on tag pushes. On a plain push to
       # main or a manual workflow_dispatch, electron-builder's "dir" target
-      # leaves an unpackaged release/mac-*/Slopsmith.app that the artifact
+      # leaves an unpackaged release/mac-*/<productName>.app that the artifact
       # upload globs (AppImage/deb/exe/velopack) don't match — so testers got
       # no macOS build. Zip the .app with ditto (preserves the bundle's
       # internal symlinks + any signature/xattrs) so a tester-ready macOS
       # archive ships from ordinary CI runs without cutting a release tag.
       # Skipped on tags so it never races or duplicates the Velopack output.
       # The archive is unsigned/un-notarized — testers clear Gatekeeper with
-      #   xattr -dr com.apple.quarantine Slopsmith.app
+      #   xattr -dr com.apple.quarantine "fee[dB]ack.app"
       - name: Zip macOS app for tester distribution (non-tag)
         if: matrix.platform == 'mac' && !startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           set -euo pipefail
-          app=$(ls -d release/mac*/Slopsmith.app 2>/dev/null | head -n1 || true)
+          # Name-agnostic *.app glob: the product name "fee[dB]ack" contains
+          # [dB], which a shell glob would treat as a character class.
+          app=$(ls -d release/mac*/*.app 2>/dev/null | head -n1 || true)
           if [[ -z "${app:-}" || ! -d "$app" ]]; then
-            echo "::error::No Slopsmith.app found under release/mac*/ — macOS build produced no bundle."
+            echo "::error::No .app bundle found under release/mac*/ — macOS build produced no bundle."
             exit 1
           fi
-          ditto -c -k --sequesterRsrc --keepParent "$app" "release/Slopsmith-macos-arm64.zip"
-          echo "Zipped $app -> release/Slopsmith-macos-arm64.zip"
-          ls -lh release/Slopsmith-macos-arm64.zip
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release/feedback-macos-arm64.zip"
+          echo "Zipped $app -> release/feedback-macos-arm64.zip"
+          ls -lh release/feedback-macos-arm64.zip
 
       # Velopack: derive update channel from tag name. Only runs for
       # tag pushes (refs/tags/v*) on win + mac — Linux still ships via
@@ -369,7 +371,11 @@ jobs:
       # path ending in .app as a prebuilt bundle. A non-.app folder
       # would instead trigger auto-bundle mode (which also needs
       # --icon). electron-builder's "dir" target writes the bundle to
-      # release/mac-arm64/Slopsmith.app on the arm64 runner.
+      # release/mac-arm64/<productName>.app on the arm64 runner — resolved
+      # at runtime with a *.app glob because the product name "fee[dB]ack"
+      # contains [dB], which a shell glob would treat as a character class.
+      # --packId stays "Slopsmith" deliberately: existing installs look up
+      # updates by pack ID, so renaming it would strand them.
       - name: Velopack pack (macOS)
         if: matrix.platform == 'mac' && steps.velopack_channel.outputs.channel != ''
         shell: bash
@@ -380,6 +386,11 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          app=$(ls -d release/mac-arm64/*.app 2>/dev/null | head -n1 || true)
+          if [[ -z "${app:-}" || ! -d "$app" ]]; then
+            echo "::error::No .app bundle found under release/mac-arm64/ for Velopack pack."
+            exit 1
+          fi
           # The signed/notarized branch needs ALL four Apple secrets — vpk
           # would fail outright if handed an empty --notary* value. If any
           # is missing (forks, partial secret configs) fall back to an
@@ -392,7 +403,7 @@ jobs:
               --packId Slopsmith \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
-              --packDir release/mac-arm64/Slopsmith.app \
+              --packDir "$app" \
               -o release/velopack
           else
             # vpk notarizes through a notarytool *credential profile*, not
@@ -414,7 +425,7 @@ jobs:
               --packId Slopsmith \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
-              --packDir release/mac-arm64/Slopsmith.app \
+              --packDir "$app" \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
               --notaryProfile "velopack-notary"
@@ -432,7 +443,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: slopsmith-${{ matrix.platform }}-${{ matrix.arch }}
+          name: feedback-${{ matrix.platform }}-${{ matrix.arch }}
           # release/win-unpacked/ is intentionally NOT uploaded: it is the
           # uncompressed intermediate build tree (~1 GB on Windows) that
           # Velopack packs into release/velopack/. Uploading it duplicated

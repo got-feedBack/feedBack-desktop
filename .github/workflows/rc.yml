@@ -80,7 +80,7 @@ jobs:
 
       # macOS: import signing cert so build-macos.sh can codesign the .app.
       # RC builds are signed but not notarized (same as nightlies) — testers
-      # clear Gatekeeper with `xattr -dr com.apple.quarantine Slopsmith.app`.
+      # clear Gatekeeper with `xattr -dr com.apple.quarantine "fee[dB]ack.app"`.
       # Graceful fallback: no-op when secrets are absent.
       - name: Import Apple signing certificate
         if: matrix.platform == 'mac'
@@ -125,23 +125,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app=$(ls -d release/mac*/Slopsmith.app 2>/dev/null | head -n1 || true)
+          # Name-agnostic *.app glob: the product name "fee[dB]ack" contains
+          # [dB], which a shell glob would treat as a character class.
+          app=$(ls -d release/mac*/*.app 2>/dev/null | head -n1 || true)
           if [[ -z "${app:-}" || ! -d "$app" ]]; then
-            echo "::error::No Slopsmith.app found under release/mac*/"
+            echo "::error::No .app bundle found under release/mac*/"
             exit 1
           fi
-          ditto -c -k --sequesterRsrc --keepParent "$app" "release/Slopsmith-macos-arm64.zip"
-          echo "Zipped $app -> release/Slopsmith-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release/feedback-macos-arm64.zip"
+          echo "Zipped $app -> release/feedback-macos-arm64.zip"
 
       # Windows: electron-builder's `dir` target leaves win-unpacked/ with no
       # packaged installer (Velopack is skipped for RC builds). Zip the directory
-      # so testers can download and extract, then launch Slopsmith.exe directly.
+      # so testers can download and extract, then launch the app .exe directly.
       - name: Zip win-unpacked
         if: matrix.platform == 'win'
         shell: pwsh
         run: |
-          Compress-Archive -Path release\win-unpacked\* -DestinationPath release\Slopsmith-windows-x64.zip
-          Write-Host "Zipped win-unpacked -> release\Slopsmith-windows-x64.zip"
+          Compress-Archive -Path release\win-unpacked\* -DestinationPath release\feedback-windows-x64.zip
+          Write-Host "Zipped win-unpacked -> release\feedback-windows-x64.zip"
 
       - name: Clean up signing keychain
         if: always() && matrix.platform == 'mac'

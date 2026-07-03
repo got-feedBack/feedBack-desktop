@@ -102,14 +102,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app=$(ls -d release/mac*/Slopsmith.app 2>/dev/null | head -n1 || true)
+          # Name-agnostic *.app glob: the product name "fee[dB]ack" contains
+          # [dB], which a shell glob would treat as a character class.
+          app=$(ls -d release/mac*/*.app 2>/dev/null | head -n1 || true)
           if [[ -z "${app:-}" || ! -d "$app" ]]; then
-            echo "::error::No Slopsmith.app found under release/mac*/ — macOS build produced no bundle."
+            echo "::error::No .app bundle found under release/mac*/ — macOS build produced no bundle."
             exit 1
           fi
-          ditto -c -k --sequesterRsrc --keepParent "$app" "release/Slopsmith-macos-arm64.zip"
-          echo "Zipped $app -> release/Slopsmith-macos-arm64.zip"
-          ls -lh release/Slopsmith-macos-arm64.zip
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release/feedback-macos-arm64.zip"
+          echo "Zipped $app -> release/feedback-macos-arm64.zip"
+          ls -lh release/feedback-macos-arm64.zip
 
       - name: Derive Velopack channel
         id: velopack_channel
@@ -201,6 +203,16 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          # Resolve the .app at runtime with a *.app glob — the product name
+          # "fee[dB]ack" contains [dB], which a shell glob would treat as a
+          # character class. --packId stays "Slopsmith" deliberately:
+          # existing installs look up updates by pack ID, so renaming it
+          # would strand them.
+          app=$(ls -d release/mac-arm64/*.app 2>/dev/null | head -n1 || true)
+          if [[ -z "${app:-}" || ! -d "$app" ]]; then
+            echo "::error::No .app bundle found under release/mac-arm64/ for Velopack pack."
+            exit 1
+          fi
           if [[ -z "${APPLE_SIGNING_IDENTITY:-}" || -z "${APPLE_ID:-}" \
                 || -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" \
                 || -z "${APPLE_TEAM_ID:-}" ]]; then
@@ -209,7 +221,7 @@ jobs:
               --packId Slopsmith \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
-              --packDir release/mac-arm64/Slopsmith.app \
+              --packDir "$app" \
               -o release/velopack
           else
             xcrun notarytool store-credentials "velopack-notary" \
@@ -220,7 +232,7 @@ jobs:
               --packId Slopsmith \
               --packVersion "${{ steps.velopack_channel.outputs.version }}" \
               --channel "osx-arm64-${{ steps.velopack_channel.outputs.channel }}" \
-              --packDir release/mac-arm64/Slopsmith.app \
+              --packDir "$app" \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
               --notaryProfile "velopack-notary"
@@ -234,7 +246,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: slopsmith-${{ matrix.platform }}-${{ matrix.arch }}
+          name: feedback-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             release/*.AppImage
             release/*.deb
