@@ -1031,17 +1031,17 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             console.warn('[audio-engine] Corrupted slopsmith-signal-chain; starting empty:', e);
             savedChain = [];
         }
-        // Drop Rig Builder plumbing stages from legacy saves. Before
-        // saveChainStateFromChain learned to skip Rig-Builder-owned chains, a
+        // Drop Rig Builder stages from legacy saves. Before
+        // saveChainStateFromChain learned to filter Rig-Builder-owned stages, a
         // user chain action taken while Rig Builder's default tone was live
-        // persisted its wrap stages (unit-impulse trim IR, Final Leveler) into
+        // persisted its stages (amp, unit-impulse trim IR, Final Leveler) into
         // the saved chain; restoring those as plain processors resurrects a
         // tone this panel never built. Rewrite the cleaned list back so the
         // save self-heals.
-        const _cleaned = savedChain.filter((item) => !isRigBuilderChainStage(item));
+        const _cleaned = savedChain.filter((item) => !aeIsRigBuilderStage(item));
         if (_cleaned.length !== savedChain.length) {
             console.info('[audio-engine] Dropped', savedChain.length - _cleaned.length,
-                'Rig Builder plumbing stage(s) from the saved chain.');
+                'Rig Builder stage(s) from the saved chain.');
             try { localStorage.setItem('slopsmith-signal-chain', JSON.stringify(_cleaned)); } catch (_) {}
             savedChain = _cleaned;
         }
@@ -1061,30 +1061,65 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (savedChain.length > 0) await refreshChain();
     }
 
-    // Rig Builder plumbing markers. Its default-tone/preview wraps carry a
-    // 1-sample unit-impulse trim IR and an auto-appended "RB Final Leveler"
-    // stage — a chain containing either was built by the Rig Builder plugin,
-    // not by this panel.
-    const RB_PLUMBING_MARKER = /_rb_unit_impulse|RB Final Leveler/i;
-    function isRigBuilderChainStage(stage) {
-        return RB_PLUMBING_MARKER.test(String(stage?.path || ''))
-            || RB_PLUMBING_MARKER.test(String(stage?.name || ''));
+    // A chain stage that belongs to Rig Builder's tone (amp / pedals / racks /
+    // unit-impulse trim IR / master pre-post / the RB Final Leveler), NOT
+    // something the user added by hand here in the Audio menu. Rig Builder's
+    // preloader is always on and loads its whole tone into the SHARED engine
+    // chain; without this guard, "Save Current Chain" (and the auto-persist)
+    // captured the live engine via getChainState()/savePreset() and baked
+    // those stages into the user's manual chain — so on reload the user's own
+    // signal chain sprouted a full Rig Builder amp/pedal/rack rig they never
+    // added.
+    function aeIsRigBuilderStage(s) {
+        if (!s) return false;
+        const path = String(s.path || s.file || '');
+        if (/[\\/]rig_builder[\\/]/i.test(path)) return true;   // bundled RB amp/pedal/rack/leveler VST3
+        const name = String(s.name || '');
+        // Leveler + the 1-sample unit-impulse trim IR match by name or path so
+        // copies living outside the plugin dir are still recognized.
+        if (/RB Final Leveler|_rb_unit_impulse/i.test(name)
+            || /RB Final Leveler|_rb_unit_impulse/i.test(path)) return true;
+        const gear = String(s.rs_gear || s.rsGear || '');
+        if (gear.indexOf('__rb') === 0) return true;            // __rb_final_leveler__ / master sentinels
+        const slot = String(s.slot || '');
+        if (slot === 'master_pre' || slot === 'master_post') return true;
+        return false;
+    }
+
+    // Strip Rig Builder's stages out of the engine's native preset blob so a
+    // saved manual preset only carries the user's own processors (with their VST
+    // param state). The blob is JSON with a `chain` array; a user's manual chain
+    // is flat (no positional cross-refs) so filtering it is safe.
+    function aeStripRigBuilderFromNativePreset(nativePreset) {
+        try {
+            const isStr = typeof nativePreset === 'string';
+            const obj = isStr ? JSON.parse(nativePreset) : nativePreset;
+            if (obj && Array.isArray(obj.chain)) {
+                obj.chain = obj.chain.filter(s => !aeIsRigBuilderStage(s));
+            }
+            return isStr ? JSON.stringify(obj) : obj;
+        } catch (_) {
+            return nativePreset;   // unparseable — leave untouched
+        }
     }
 
     function saveChainStateFromChain(chain) {
-        // Never persist a Rig-Builder-owned chain. Rig Builder reloads its
-        // default tone into the engine on its own schedule (song stop, screen
-        // leave), so it is routinely the ambient live chain while the user is
-        // in this panel; snapshotting it here would make the saved chain
-        // resurrect Rig Builder's tone on the next restore. Keep the last
-        // panel-built chain instead.
-        if (Array.isArray(chain) && chain.some(isRigBuilderChainStage)) return;
+        // Persist only the USER's stages. Rig Builder reloads its default tone
+        // into the engine on its own schedule (song stop, screen leave), so it
+        // is routinely the ambient live chain while the user is in this panel;
+        // snapshotting its stages would make the saved chain resurrect Rig
+        // Builder's tone on the next restore. Filtering (rather than skipping
+        // the save entirely) still captures processors the user stacked on top
+        // of a live Rig Builder tone — e.g. "add NAM while RB's amp is loaded"
+        // persists just the NAM.
         const typeMap = { 0: 'VST', 1: 'NAM', 2: 'IR' };
-        const items = chain.filter(s => s.type === 0 || s.type === 1 || s.type === 2).map(s => ({
-            type: typeMap[s.type] || 'VST',
-            path: s.path || '',
-            name: s.name || '',
-        }));
+        const items = chain
+            .filter(s => (s.type === 0 || s.type === 1 || s.type === 2) && !aeIsRigBuilderStage(s))
+            .map(s => ({
+                type: typeMap[s.type] || 'VST',
+                path: s.path || '',
+                name: s.name || '',
+            }));
         try { localStorage.setItem('slopsmith-signal-chain', JSON.stringify(items)); } catch (_) {}
     }
 
@@ -1290,15 +1325,29 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const chain = await api.getChainState();
         container.innerHTML = '';
 
-        if (chain.length === 0) {
-            container.innerHTML = '<div class="text-sm text-slate-500 italic">No processors loaded — add a VST, NAM model, or cabinet IR</div>';
+        // List only the user's own processors — Rig Builder's always-on tone is
+        // loaded into the same engine chain but it isn't part of the manual chain
+        // the user is building here (see aeIsRigBuilderStage). Rig Builder's
+        // stages are audible though, so never hide them SILENTLY: a user hearing
+        // an amp while this panel claims "No processors loaded" reads as a
+        // phantom tone. Surface a count note instead; the stages themselves are
+        // managed from the Rig Builder screen.
+        const all = Array.isArray(chain) ? chain : [];
+        const visible = all.filter(s => !aeIsRigBuilderStage(s));
+        const rbCount = all.length - visible.length;
+        const rbNote = rbCount > 0
+            ? `<div class="text-xs text-amber-500/80 italic mt-1">+ ${rbCount} Rig Builder tone stage${rbCount === 1 ? '' : 's'} active (managed in Rig Builder)</div>`
+            : '';
+
+        if (visible.length === 0) {
+            container.innerHTML = '<div class="text-sm text-slate-500 italic">No processors loaded — add a VST, NAM model, or cabinet IR</div>' + rbNote;
             return chain;
         }
 
         const typeNames = { 0: 'VST', 1: 'NAM', 2: 'IR' };
         const typeColors = { 0: 'purple', 1: 'orange', 2: 'cyan' };
 
-        for (const slot of chain) {
+        for (const slot of visible) {
             const color = typeColors[slot.type] || 'slate';
             const div = document.createElement('div');
             div.className = `flex items-center gap-3 p-3 rounded bg-slate-800/50 border border-${color}-500/30`;
@@ -1317,6 +1366,11 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                         onclick="_aeRemoveSlot(${slot.id})">Remove</button>
             `;
             container.appendChild(div);
+        }
+        if (rbNote) {
+            const note = document.createElement('div');
+            note.innerHTML = rbNote;
+            container.appendChild(note.firstChild);
         }
         return chain;
     }
@@ -1748,14 +1802,20 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const doSave = async () => {
                 const name = input.value.trim();
                 if (!name) return;
-                const nativePreset = await api.savePreset();
-                if (!nativePreset) return;
+                const nativePresetRaw = await api.savePreset();
+                if (!nativePresetRaw) return;
+                // Keep Rig Builder's always-on tone out of the user's manual
+                // preset (see aeIsRigBuilderStage) — both the native blob and the
+                // item list.
+                const nativePreset = aeStripRigBuilderFromNativePreset(nativePresetRaw);
                 const chain = await api.getChainState();
-                const items = chain.map(s => ({
-                    type: s.type === 0 ? 'VST' : s.type === 1 ? 'NAM' : 'IR',
-                    path: s.path || '',
-                    name: s.name || '',
-                }));
+                const items = chain
+                    .filter(s => !aeIsRigBuilderStage(s))
+                    .map(s => ({
+                        type: s.type === 0 ? 'VST' : s.type === 1 ? 'NAM' : 'IR',
+                        path: s.path || '',
+                        name: s.name || '',
+                    }));
                 const gains = captureCurrentGainLevels();
                 const noiseGate = captureCurrentNoiseGateState();
                 const tonePolish = captureCurrentTonePolishState();
@@ -2311,7 +2371,19 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
         try {
             await api.clearChain();
-            const result = await api.loadPreset(preset.nativePreset);
+            // Clean any Rig Builder stages a pre-fix build baked into this saved
+            // preset (see aeIsRigBuilderStage). Guard: if stripping would empty a
+            // preset that actually had stages, load it unchanged rather than a
+            // silent empty chain.
+            let _nativeToLoad = aeStripRigBuilderFromNativePreset(preset.nativePreset);
+            try {
+                const before = JSON.parse(typeof preset.nativePreset === 'string' ? preset.nativePreset : JSON.stringify(preset.nativePreset || '{}'));
+                const after = JSON.parse(typeof _nativeToLoad === 'string' ? _nativeToLoad : JSON.stringify(_nativeToLoad || '{}'));
+                if (Array.isArray(before?.chain) && before.chain.length && Array.isArray(after?.chain) && after.chain.length === 0) {
+                    _nativeToLoad = preset.nativePreset;
+                }
+            } catch (_) { _nativeToLoad = preset.nativePreset; }
+            const result = await api.loadPreset(_nativeToLoad);
             // Some JUCE bridges return {success:false} or bare false instead of throwing.
             if (result === false || (result && result.success === false)) {
                 console.error(tag + ': loadPreset failed:', result?.error || 'unknown error');
