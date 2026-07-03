@@ -2314,6 +2314,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         } catch (_) { nativeChain = []; }
         for (let ci = 0; ci < chainItems.length; ci++) {
             const item = chainItems[ci];
+            // Legacy polluted presets: skip Rig Builder stages a pre-fix build
+            // baked in (see aeIsRigBuilderStage). Skipping by index keeps the
+            // items ↔ nativeChain alignment intact for the remaining pairs.
+            if (aeIsRigBuilderStage(item) || aeIsRigBuilderStage(nativeChain[ci])) continue;
             let slotId = -1;
             if (item.type === 'NAM' && item.path) slotId = await api.loadNAMModel(item.path);
             else if (item.type === 'IR' && item.path) slotId = await api.loadIR(item.path);
@@ -2465,6 +2469,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     window._aeApplyPresetTonePolish = applyPresetTonePolish;
     window._aeLoadDefaultPreset = loadDefaultPreset;
     window._aeReplaceChainWithPresetBlob = replaceChainWithPresetBlob;
+    // Shared with IIFE 2's inline preload copy (the two IIFEs deliberately
+    // don't share scope) so its legacy-preset load skips Rig Builder stages too.
+    window._aeIsRigBuilderStage = aeIsRigBuilderStage;
 
     /** True when the song has tone-switching configured — a resolvable
      *  global / per-song bypass mapping, or Tone Automation with a resolvable
@@ -4874,8 +4881,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                         const parsed = JSON.parse(preset.nativePreset || '{}').chain;
                         if (Array.isArray(parsed)) nativeChain = parsed;
                     } catch (_) { nativeChain = []; }
+                    const _isRbStage = window._aeIsRigBuilderStage || (() => false);
                     for (let ci = 0; ci < chainItems.length; ci++) {
                         const item = chainItems[ci];
+                        // Legacy polluted presets: skip Rig Builder stages a
+                        // pre-fix build baked in. Skipping by index keeps the
+                        // items ↔ nativeChain alignment for remaining pairs
+                        // (mirrors loadPresetItemsWithState in IIFE 1).
+                        if (_isRbStage(item) || _isRbStage(nativeChain[ci])) continue;
                         let slotId = -1;
                         if (item.type === 'NAM' && item.path) slotId = await api.loadNAMModel(item.path);
                         else if (item.type === 'IR' && item.path) slotId = await api.loadIR(item.path);
