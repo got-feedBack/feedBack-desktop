@@ -9,16 +9,46 @@ on:
     - cron: '0 23 * * *'
   workflow_dispatch:
 
+# Serialize nightly runs so a manual dispatch overlapping the scheduled cron
+# can't race on the rolling `nightly` release (the publish job deletes and
+# recreates it; two concurrent runs could interleave into a "release already
+# exists" failure). Newer run wins; the in-progress one is cancelled.
+concurrency:
+  group: nightly-release
+  cancel-in-progress: true
+
 jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
       date: ${{ steps.date.outputs.date }}
+      version: ${{ steps.version.outputs.version }}
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Get date
         id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      # Nightly Velopack version: <package.json base>-nightly.<UTC date>.
+      # Strip any prerelease suffix from package.json (0.3.0-alpha -> 0.3.0) so
+      # successive nights produce clean, SemVer-monotonic prerelease versions
+      # (0.3.0-nightly.20260706 < 0.3.0-nightly.20260707). The nightly channel
+      # has its own Velopack feed (win-x64-nightly / osx-arm64-nightly), so this
+      # never collides with the tag-driven alpha/beta/rc/stable feeds from
+      # build.yml. Note: two runs on the same UTC date (e.g. a manual dispatch
+      # after the scheduled build) produce identical versions — the client sees
+      # the second as "not newer" and skips it. Acceptable for a daily channel.
+      - name: Derive nightly version
+        id: version
+        run: |
+          set -euo pipefail
+          base="$(node -p "require('./package.json').version")"
+          base="${base%%-*}"
+          version="${base}-nightly.${{ steps.date.outputs.date }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Nightly Velopack version: $version"
 
   # build-core removed: core's own nightly.yml already builds + pushes
   # ghcr.io/got-feedback/feedback:nightly on the same 02:00 UTC cron, so this
@@ -53,9 +83,11 @@ jobs:
         run: |
           NODE_VERSION=$(node -p "require('./.build-config.json').versions.node")
           PYTHON_VERSION=$(node -p "require('./.build-config.json').versions.python")
+          DOTNET_VERSION=$(node -p "require('./.build-config.json').versions.dotnet")
           echo "node=$NODE_VERSION" >> $GITHUB_OUTPUT
           echo "python=$PYTHON_VERSION" >> $GITHUB_OUTPUT
-          echo "Node ${NODE_VERSION}, Python ${PYTHON_VERSION}"
+          echo "dotnet=$DOTNET_VERSION" >> $GITHUB_OUTPUT
+          echo "Node ${NODE_VERSION}, Python ${PYTHON_VERSION}, .NET ${DOTNET_VERSION}"
 
       - uses: actions/setup-node@v4
         with:
@@ -64,6 +96,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.config.outputs.python }}
+
+      # Pin the .NET runtime for the Velopack CLI (vpk targets net8). Only the
+      # win + mac legs pack Velopack, so Linux doesn't need it. build.yml pins
+      # this for the identical vpk step — without it the pack works only by
+      # luck of the runner image happening to preinstall .NET 8.
+      - uses: actions/setup-dotnet@v4
+        if: matrix.platform != 'linux'
+        with:
+          dotnet-version: ${{ steps.config.outputs.dotnet }}.x
 
       # macOS: import signing cert so build-macos.sh can codesign the .app.
       # The nightly .app is signed but not notarized — testers clear Gatekeeper with
@@ -140,6 +181,127 @@ jobs:
           Compress-Archive -Path release\win-unpacked\* -DestinationPath release\feedback-windows-x64.zip
           Write-Host "Zipped win-unpacked -> release\feedback-windows-x64.zip"
 
+      # Velopack: pack the nightly build into an auto-update feed on the rolling
+      # `nightly` channel (Windows + macOS only — Linux ships AppImage/deb with
+      # no Velopack pipeline). Mirrors build.yml's tag-driven pack, but the
+      # channel is fixed to `nightly` and the version comes from the setup job
+      # instead of a git tag. The client's update-manager.ts builds the same
+      # rid-scoped channel names (win-x64-nightly / osx-arm64-nightly).
+      - name: Install Velopack CLI (vpk)
+        if: matrix.platform != 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pin vpk to the exact version of the velopack npm SDK used by the app
+          # (package.json) — Velopack ships the CLI and SDK in lockstep.
+          dotnet tool install -g vpk --version 0.0.1589-ga2c5a97
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      # Windows: pack the electron-builder unpacked dir into Velopack release
+      # assets (per-machine MSI, *-full.nupkg, *-delta.nupkg,
+      # releases.win-x64-nightly.json). Unsigned (same as build.yml's win pack).
+      # See build.yml's "Velopack pack (Windows)" for the --msi / Setup.exe
+      # policy rationale — this is a channel-swapped copy of it.
+      - name: Velopack pack (Windows)
+        if: matrix.platform == 'win'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The launcher exe is the electron-builder 'dir' output, whose name is
+          # the SANITIZED productName (e.g. fee[dB]ack -> feedback.exe). Find it
+          # dynamically — there's a single .exe at the win-unpacked root.
+          mainexe=$(basename "$(ls release/win-unpacked/*.exe 2>/dev/null | head -n1)")
+          if [[ -z "${mainexe:-}" ]]; then
+            echo "::error::No .exe launcher in release/win-unpacked/"; ls -1 release/win-unpacked/ | head -20; exit 1
+          fi
+          vpk pack \
+            --packId feedback \
+            --packVersion "${{ needs.setup.outputs.version }}" \
+            --channel "win-x64-nightly" \
+            --packDir release/win-unpacked \
+            --mainExe "$mainexe" \
+            --msi \
+            --instLocation PerMachine \
+            -o release/velopack
+          # Drop the per-user Setup.exe (default vpk output) so only the
+          # per-machine MSI ships. nocaseglob so a casing change can't slip an
+          # installer past the glob.
+          shopt -s nullglob nocaseglob
+          removed=0
+          for f in release/velopack/*setup.exe; do
+            echo "Removing per-user installer: $f"
+            rm -f "$f"
+            removed=$((removed+1))
+          done
+          if compgen -G "release/velopack/*setup.exe" > /dev/null; then
+            echo "::error::Setup.exe artifact(s) remain after cleanup; refusing to publish dual installer types."
+            ls -1 release/velopack/*setup.exe
+            exit 1
+          fi
+          if [[ "$removed" -eq 0 ]]; then
+            echo "::notice::No Setup.exe output from vpk; shipping MSI-only artifacts."
+          fi
+          if ! compgen -G "release/velopack/*.msi" > /dev/null; then
+            echo "::error::vpk pack --msi x64 did not produce a .msi file in release/velopack/"
+            exit 1
+          fi
+
+      # macOS: same, but pass Apple signing identity + notarization creds so
+      # Velopack codesigns + notarizes the bundle it generates (otherwise
+      # Gatekeeper blocks auto-applied updates). Unlike the tester .zip above
+      # (signed-not-notarized), the auto-update feed MUST be notarized to be
+      # applyable on user machines, so nightly notarizes here. Falls back to an
+      # unsigned pack if any Apple secret is missing (forks / partial configs).
+      # Runs before the keychain cleanup below (needs the signing cert).
+      - name: Velopack pack (macOS)
+        if: matrix.platform == 'mac'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # The .app bundle + its executable are named after productName (e.g.
+          # fee[dB]ack.app), not the packId — resolve them dynamically.
+          app=$(ls -d release/mac-arm64/*.app 2>/dev/null | head -n1 || true)
+          if [[ -z "${app:-}" || ! -d "$app" ]]; then
+            echo "::error::No .app bundle in release/mac-arm64/"
+            exit 1
+          fi
+          mainexe=$(basename "$app" .app)
+          if [[ -z "${APPLE_SIGNING_IDENTITY:-}" || -z "${APPLE_ID:-}" \
+                || -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" \
+                || -z "${APPLE_TEAM_ID:-}" ]]; then
+            echo "::warning::Apple signing/notarization secrets incomplete — packing macOS Velopack release UNSIGNED. Gatekeeper will block auto-updates on user machines."
+            vpk pack \
+              --packId feedback \
+              --packVersion "${{ needs.setup.outputs.version }}" \
+              --channel "osx-arm64-nightly" \
+              --packDir "$app" \
+              --mainExe "$mainexe" \
+              -o release/velopack
+          else
+            # vpk notarizes through a notarytool *credential profile*. Create it
+            # first, then hand vpk --notaryProfile. Do NOT pass --keychain:
+            # notarytool defaults to the login keychain, matching vpk's own
+            # internal notarytool call.
+            xcrun notarytool store-credentials "velopack-notary" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID"
+            vpk pack \
+              --packId feedback \
+              --packVersion "${{ needs.setup.outputs.version }}" \
+              --channel "osx-arm64-nightly" \
+              --packDir "$app" \
+              --mainExe "$mainexe" \
+              -o release/velopack \
+              --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
+              --notaryProfile "velopack-notary"
+          fi
+
       - name: Clean up signing keychain
         if: always() && matrix.platform == 'mac'
         run: |
@@ -153,6 +315,73 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/*.zip
+            release/velopack/**/*
             build/Release/*.pdb
           if-no-files-found: warn
           retention-days: 7
+
+  # Publish the Velopack nightly feed to a single ROLLING GitHub Release tagged
+  # `nightly`. The in-app updater on the nightly channel reads this release:
+  # Velopack's GitHub loader iterates recent releases looking for the
+  # releases.<channel>.json asset, and can ONLY see real Releases (not workflow
+  # artifacts) and ONLY non-prerelease rows (the JS SDK's AutoSource hardcodes
+  # prerelease=false). So we delete + recreate the `nightly` release each run
+  # (assets are version-stamped, so clobbering by name wouldn't reclaim old
+  # ones) with prerelease=false and --latest=false — the "Latest" badge stays
+  # pinned to the most recent stable tag. Full .nupkg only; no deltas (each run
+  # wipes the prior full package, which vpk would need to compute a delta).
+  publish:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish rolling nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          DATE: ${{ needs.setup.outputs.date }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+
+          # Collect the Velopack feed (win + mac) plus Linux distributables so
+          # testers can also download nightlies by hand. The `**` before
+          # velopack matches whether or not upload-artifact stripped the
+          # `release/` prefix (it depends on the least-common-ancestor of all
+          # files in each per-platform artifact).
+          assets=(
+            artifacts/**/velopack/**/*
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+          )
+          # Filter to real files (globs that matched nothing expand to nothing
+          # under nullglob, but guard against directories sneaking in).
+          files=()
+          for a in "${assets[@]}"; do
+            [[ -f "$a" ]] && files+=("$a")
+          done
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "::error::No release assets found under artifacts/ — refusing to publish an empty nightly release."
+            exit 1
+          fi
+          echo "Publishing ${#files[@]} asset(s) to the rolling 'nightly' release:"
+          printf '  %s\n' "${files[@]}"
+
+          # Recreate the rolling release so the tag re-points to this run's SHA
+          # and stale assets from the prior night are dropped. --cleanup-tag so
+          # the recreated release's --target takes effect. Tolerate first-run
+          # (no existing release/tag).
+          gh release delete nightly --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+
+          gh release create nightly \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Nightly ${VERSION}" \
+            --notes "Automated nightly build (${DATE}). Least-stable channel — auto-updates via the in-app **Nightly** update channel (Windows + macOS). Linux users download the AppImage/.deb below manually." \
+            --latest=false \
+            "${files[@]}"

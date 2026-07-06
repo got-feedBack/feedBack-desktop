@@ -3,7 +3,10 @@
 // Architecture:
 //   - The renderer persists the user's release channel in localStorage and
 //     calls setChannel() on boot so this module's UpdateManager is bound to
-//     the right feed (stable | rc | beta | alpha).
+//     the right feed (stable | rc | beta | alpha | nightly). The nightly feed
+//     is published by .github/workflows/nightly.yml as a rolling `nightly`
+//     GitHub Release (rid channels win-x64-nightly / osx-arm64-nightly),
+//     unlike the tag-driven alpha/beta/rc/stable feeds from build.yml.
 //   - On init() and then every 4 hours we run checkForUpdatesAsync(); when a
 //     hit comes back we download in the background, broadcast
 //     update:available immediately and update:downloaded once the .nupkg is
@@ -41,7 +44,7 @@ import { app, BrowserWindow } from 'electron';
 import type { UpdateInfo } from 'velopack';
 import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED } from './ipc-channels';
 
-export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha';
+export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 
 export type UpdateStatus =
     | { status: 'unsupported'; platform: 'linux' }

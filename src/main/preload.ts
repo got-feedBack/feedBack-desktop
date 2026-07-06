@@ -39,7 +39,7 @@ import {
 // from update-manager.ts) so the preload bundle doesn't drag in the Velopack
 // SDK — preload runs in a restricted context and we don't want native
 // require()s evaluated here.
-export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha';
+export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 export interface UpdateAvailablePayload { version: string; channel: UpdateChannel }
 export interface UpdateDownloadedPayload { version: string; channel: UpdateChannel }
 

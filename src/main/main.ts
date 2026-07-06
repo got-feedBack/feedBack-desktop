@@ -1108,7 +1108,7 @@ async function startup(): Promise<void> {
         // IPC is untyped at runtime — validate the channel string before forwarding
         // so a renderer bug or compromised page can't pass arbitrary values into
         // the Velopack SDK.
-        const VALID_CHANNELS: readonly string[] = ['stable', 'rc', 'beta', 'alpha'];
+        const VALID_CHANNELS: readonly string[] = ['stable', 'rc', 'beta', 'alpha', 'nightly'];
         if (typeof channel !== 'string' || !VALID_CHANNELS.includes(channel)) {
             return updateManager.getStatus();
         }
