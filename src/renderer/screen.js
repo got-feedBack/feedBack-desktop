@@ -1873,7 +1873,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const linuxNote = document.getElementById('update-linux-note');
         if (!channelSelect || !checkBtn || !statusEl) return;
 
-        const VALID_CHANNELS = ['stable', 'rc', 'beta', 'alpha'];
+        const VALID_CHANNELS = ['stable', 'rc', 'beta', 'alpha', 'nightly'];
         const storedChannelRaw = localStorage.getItem('slopsmith-update-channel');
         const storedChannel = VALID_CHANNELS.includes(storedChannelRaw) ? storedChannelRaw : 'stable';
         channelSelect.value = storedChannel;
