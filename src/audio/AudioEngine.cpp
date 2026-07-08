@@ -254,12 +254,17 @@ AudioEngine::DeviceOptions AudioEngine::probeDeviceOptionsDual(const juce::Strin
         const juce::String probeOutputName =
             options.output.isEmpty() && outputs.size() > 0 ? outputs[0] : options.output;
 
-        // Same backend type can usually be opened by one AudioDeviceManager even
-        // when the capture/render endpoint names differ (common for USB guitar
-        // cables: cable input + normal speakers). Probe that low-latency path
-        // first; split mode is only needed for different backend types or when
-        // the backend refuses a combined input/output device.
-        bool isDuplex = options.inputType == options.outputType;
+        // Probe the SAME way setAudioDevices() will actually apply, or the
+        // startup auto-apply mis-fires: init() fail-closes on this probe's
+        // `compatible` verdict, so if the probe measures a combined duplex device
+        // but apply then opens split (or vice-versa), the verdict describes a
+        // config that won't be the one used — the classic symptom being "no audio
+        // until I press Apply". Duplex is only attempted for the SAME physical
+        // endpoint (a true single-clock device); two different endpoints of the
+        // same backend (USB cable in + separate speakers out) are two clocks and
+        // go split. Mirror setAudioDevices()'s sameEndpointIntent exactly.
+        bool isDuplex = (options.inputType == options.outputType)
+                        && (options.input == options.output);
 
         if (isDuplex)
         {
