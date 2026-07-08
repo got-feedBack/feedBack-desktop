@@ -61,13 +61,28 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
     // range — the broadcast branches fill all of them, the pass-through branch
     // only fills the overlap.
     int filledOutputChannels = 0;
-    if (numInputChannels >= 2 && selectedCh >= 0 && selectedCh < numInputChannels)
+    if (selectedCh >= 0 && selectedCh < numInputChannels)
     {
-        // Single-channel mode (e.g. dry from Valeton GP-5 left channel).
-        // Broadcast the selected input across all output channels.
+        // Explicit single-channel pick (e.g. dry from a Valeton GP-5 left
+        // channel, or a USB guitar cable whose guitar is on a known channel).
+        // Broadcast the selected input across all output channels. Works for a
+        // mono device too (selectedCh 0 on a 1-channel input).
         for (int outCh = 0; outCh < effectiveOutputChannels; ++outCh)
             for (int i = 0; i < numSamples; ++i)
                 buffer.setSample(outCh, i, inputData[selectedCh][i] * inGain);
+        filledOutputChannels = effectiveOutputChannels;
+    }
+    else if (numInputChannels == 1)
+    {
+        // Mono input device — the common USB guitar cable enumerates as a single
+        // capture channel. Broadcast that one channel across EVERY output channel
+        // so the guitar is centred. The old pass-through branch below only filled
+        // min(numInputChannels, outputChannels) = 1 channel and zeroed the rest,
+        // which put the guitar in the left speaker only on a stereo duplex device
+        // (cable-in + speakers-out). This restores mono-in / centred-out.
+        for (int outCh = 0; outCh < effectiveOutputChannels; ++outCh)
+            for (int i = 0; i < numSamples; ++i)
+                buffer.setSample(outCh, i, inputData[0][i] * inGain);
         filledOutputChannels = effectiveOutputChannels;
     }
     else if (selectedCh < 0 && numInputChannels > 1)
@@ -93,8 +108,9 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
     }
     else
     {
-        // Pass-through: single-input device, or stereo in/out with no explicit
-        // channel selection and no need to mix.
+        // Pass-through: genuine multi-channel in/out with an out-of-range
+        // explicit selection, or other configs that map channels 1:1. (The mono
+        // and default-pair cases are handled above and always broadcast.)
         const int passThroughChannels = juce::jmin(numInputChannels, effectiveOutputChannels);
         for (int ch = 0; ch < passThroughChannels; ++ch)
             for (int i = 0; i < numSamples; ++i)
