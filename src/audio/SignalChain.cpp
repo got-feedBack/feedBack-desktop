@@ -275,6 +275,16 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
         return;
     }
 
+    // DIAG (first 25): an oversized device block reached the chain and is
+    // being sliced — records how often the pre-fix corruption path would
+    // have fired and with what sizes.
+    {
+        static std::atomic<uint32_t> sliceLogs{0};
+        if (sliceLogs.fetch_add(1, std::memory_order_relaxed) < 25)
+            fprintf(stderr, "[diag] SignalChain slicing oversized block: %d > prepared %d\n",
+                    totalSamples, maxChunk);
+    }
+
     constexpr int kMaxSliceChannels = 8;
     const int numChannels = buffer.getNumChannels();
     if (numChannels > kMaxSliceChannels)

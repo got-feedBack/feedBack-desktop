@@ -13,6 +13,7 @@
 
 void SourceChain::prepare(double sr, int blockSize)
 {
+    fprintf(stderr, "[diag] SourceChain[%d].prepare: sr=%.0f bs=%d\n", sourceId, sr, blockSize);
     // Reset the input rings so a stop→start cycle delivers a clean zero-padded
     // cold-start frame instead of mixing in stale samples from the previous run.
     // The audio thread isn't running yet (device-start hook), so relaxed is fine.

@@ -104,6 +104,15 @@ void NAMProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
     // and leaves the conv ring misaligned, garbling ALL subsequent audio until
     // the next Reset().
     const int maxChunk = currentBlockSize > 0 ? currentBlockSize : numSamples;
+    if (numSamples > maxChunk)
+    {
+        // DIAG (first 25): block bigger than the size the NAM core was Reset()
+        // with — the exact pre-fix corruption trigger, now chunked instead.
+        static std::atomic<uint32_t> chunkLogs{0};
+        if (chunkLogs.fetch_add(1, std::memory_order_relaxed) < 25)
+            fprintf(stderr, "[diag] NAMProcessor chunking oversized block: %d > prepared %d\n",
+                    numSamples, maxChunk);
+    }
     for (int offset = 0; offset < numSamples; offset += maxChunk)
     {
         const int chunk = juce::jmin(maxChunk, numSamples - offset);
