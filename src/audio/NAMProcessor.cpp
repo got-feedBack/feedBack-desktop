@@ -96,12 +96,23 @@ void NAMProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuff
         inputBuf[(size_t)i] = (double)((sum / (float)numChannels) * inLevel);
     }
 
-    // Process through NAM model (double** in, double** out)
-    double* inPtr = inputBuf.data();
-    double* outPtr = outputBuf.data();
-    double** inPtrs = &inPtr;
-    double** outPtrs = &outPtr;
-    model->process(inPtrs, outPtrs, numSamples);
+    // Process through NAM model (double** in, double** out), in slices no larger
+    // than the block size the model was Reset() with. The NAM core pre-allocates
+    // its conv ring/output buffers to that maxBufferSize and only asserts (a
+    // release-build no-op) on larger blocks — one oversized block (WASAPI shared
+    // mode delivers them right after a device start) writes past those buffers
+    // and leaves the conv ring misaligned, garbling ALL subsequent audio until
+    // the next Reset().
+    const int maxChunk = currentBlockSize > 0 ? currentBlockSize : numSamples;
+    for (int offset = 0; offset < numSamples; offset += maxChunk)
+    {
+        const int chunk = juce::jmin(maxChunk, numSamples - offset);
+        double* inPtr = inputBuf.data() + offset;
+        double* outPtr = outputBuf.data() + offset;
+        double** inPtrs = &inPtr;
+        double** outPtrs = &outPtr;
+        model->process(inPtrs, outPtrs, chunk);
+    }
 
     // Copy mono result to all output channels with output level
     float outLevel = outputLevel.load();
