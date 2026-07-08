@@ -242,13 +242,6 @@ AudioEngine::DeviceOptions AudioEngine::probeDeviceOptionsDual(const juce::Strin
         options.input = inputName;
         options.output = outputName;
 
-        // userIntendsDuplex matches setAudioDevices's classification:
-        // identical names on both sides (typically both empty = OS default)
-        // means we'll go duplex regardless of which specific devices the
-        // first-enumerated lookup would have produced.
-        const bool userIntendsDuplex = (options.inputType == options.outputType
-                                        && options.input == options.output);
-
         // For probing we still need a concrete device to instantiate.
         // Resolve empty names to first-enumerated ONLY for the probe-device
         // creation below — DON'T write back into options.input/options.output;
@@ -261,25 +254,37 @@ AudioEngine::DeviceOptions AudioEngine::probeDeviceOptionsDual(const juce::Strin
         const juce::String probeOutputName =
             options.output.isEmpty() && outputs.size() > 0 ? outputs[0] : options.output;
 
-        const bool isDuplex = userIntendsDuplex
-                              || (options.inputType == options.outputType
-                                  && options.input == options.output
-                                  && options.input.isNotEmpty());
+        // Probe the SAME way setAudioDevices() will actually apply, or the
+        // startup auto-apply mis-fires: init() fail-closes on this probe's
+        // `compatible` verdict, so if the probe measures a combined duplex device
+        // but apply then opens split (or vice-versa), the verdict describes a
+        // config that won't be the one used — the classic symptom being "no audio
+        // until I press Apply". Duplex is only attempted for the SAME physical
+        // endpoint (a true single-clock device); two different endpoints of the
+        // same backend (USB cable in + separate speakers out) are two clocks and
+        // go split. Mirror setAudioDevices()'s sameEndpointIntent exactly.
+        bool isDuplex = (options.inputType == options.outputType)
+                        && (options.input == options.output);
 
         if (isDuplex)
         {
             std::unique_ptr<juce::AudioIODevice> dev(
                 inputType->createDevice(probeOutputName, probeInputName));
-            if (!dev) { options.error = "Could not create probe device"; options.compatible = false; return options; }
-
-            options.inputChannels = dev->getInputChannelNames();
-            options.outputChannels = dev->getOutputChannelNames();
-            for (auto rate : dev->getAvailableSampleRates())
-                options.sampleRates.addIfNotAlreadyThere(rate);
-            for (auto size : dev->getAvailableBufferSizes())
-                options.bufferSizes.addIfNotAlreadyThere(size);
+            if (dev)
+            {
+                options.inputChannels = dev->getInputChannelNames();
+                options.outputChannels = dev->getOutputChannelNames();
+                for (auto rate : dev->getAvailableSampleRates())
+                    options.sampleRates.addIfNotAlreadyThere(rate);
+                for (auto size : dev->getAvailableBufferSizes())
+                    options.bufferSizes.addIfNotAlreadyThere(size);
+            }
+            else
+            {
+                isDuplex = false;
+            }
         }
-        else
+        if (!isDuplex)
         {
             std::unique_ptr<juce::AudioIODevice> inDev(
                 inputType->createDevice({}, probeInputName));
@@ -665,18 +670,6 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
         return res;
     }
 
-    // User-intent duplex: both sides came in identical (typically both
-    // empty = "system default", or both naming the same explicit device).
-    // Capture before we resolve names, otherwise the resolve loop below
-    // fills empty-input with first-input-device and empty-output with
-    // first-output-device — those usually differ (especially on macOS
-    // where defaults are separate input/output devices), and the engine
-    // would silently route into split mode with ~85ms of ring-buffer
-    // latency for a config the user expected to be duplex. Legacy
-    // pre-PR settings commonly use empty names; preserve their behavior.
-    const bool userIntendsDuplex = (resolvedInputType == resolvedOutputType
-                                    && config.inputDevice == config.outputDevice);
-
     // Don't resolve empty names to first-device-of-each-type. Pre-PR
     // behavior — and Copilot's fail-closed concern — treat empty names
     // as "OS default" per side. Filling them with inputs[0] / outputs[0]
@@ -687,10 +680,9 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     const juce::String& resolvedInput  = config.inputDevice;
     const juce::String& resolvedOutput = config.outputDevice;
 
-    const bool isDuplex = userIntendsDuplex
-                          || (resolvedInputType == resolvedOutputType
-                              && resolvedInput == resolvedOutput
-                              && resolvedInput.isNotEmpty());
+    const bool sameBackendType = (resolvedInputType == resolvedOutputType);
+    const bool sameEndpointIntent = sameBackendType
+                                    && config.inputDevice == config.outputDevice;
 
     // Normalize before branching — applyDuplexSetup() only checks `> 0` and
     // would otherwise let Infinity (or NaN slipping past N-API) reach JUCE
@@ -705,30 +697,45 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     // (Extra input devices were closed by the stopAudio() above with their intent
     // kept; startAudio() below re-opens them at the new config — split mode only.)
 
-    if (isDuplex)
+    // Only attempt the low-latency COMBINED (duplex) device when input and output
+    // are the SAME physical endpoint — a true single-clock duplex device. Two
+    // DIFFERENT endpoints of the same backend (e.g. a USB guitar cable in + separate
+    // speakers out) are independent hardware clocks; forcing them through one duplex
+    // device proved unstable across the app lifecycle (no audio until an explicit
+    // Apply, then distortion / dropouts / silent-in-song on navigation). Those route
+    // through the split path, whose ring buffer bridges the two clocks. Cross-backend
+    // pairs split too. (Low-latency for the two-device case is a separate follow-up —
+    // it needs the device-lifecycle work: startup restore + reconfigure-on-nav.)
+    if (sameEndpointIntent)
     {
         teardownSplitMode();
 
         const juce::String err = applyDuplexSetup(resolvedInput, resolvedOutput,
                                                   requestedSampleRate, requestedBufferSize);
-        if (err.isNotEmpty())
+        if (err.isEmpty())
         {
+            duplexMode.store(true, std::memory_order_relaxed);
+
+            if (auto* dev = inputDeviceManager.getCurrentAudioDevice())
+            {
+                res.sampleRate = dev->getCurrentSampleRate();
+                res.inputBlockSize = dev->getCurrentBufferSizeSamples();
+                res.outputBlockSize = res.inputBlockSize;
+            }
+            res.ok = true;
+            res.duplex = true;
+        }
+        else
+        {
+            // A same-device config that can't open combined is a real error, not a
+            // reason to silently fall to split (which would misrepresent the intent).
             res.error = err;
             res.duplex = true;
             return res;
         }
-        duplexMode.store(true, std::memory_order_relaxed);
-
-        if (auto* dev = inputDeviceManager.getCurrentAudioDevice())
-        {
-            res.sampleRate = dev->getCurrentSampleRate();
-            res.inputBlockSize = dev->getCurrentBufferSizeSamples();
-            res.outputBlockSize = res.inputBlockSize;
-        }
-        res.ok = true;
-        res.duplex = true;
     }
-    else
+
+    if (!res.ok)
     {
         DeviceConfig resolved = config;
         resolved.inputType = resolvedInputType;
