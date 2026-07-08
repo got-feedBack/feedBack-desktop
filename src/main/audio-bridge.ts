@@ -1080,6 +1080,10 @@ export function initAudioBridge(): void {
         return await audio?.loadIR(irPath) ?? -1;
     });
 
+    ipcMain.handle('audio:replaceIR', async (_event, slotId: number, irPath: string, gain?: number) => {
+        return await audio?.replaceIR(slotId, irPath, typeof gain === 'number' ? gain : -1) ?? false;
+    });
+
     ipcMain.handle('audio:removeProcessor', (_event, slotId: number) => {
         audio?.removeProcessor(slotId);
         vstSlotPaths.delete(slotId);
