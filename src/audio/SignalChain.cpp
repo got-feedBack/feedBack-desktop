@@ -216,9 +216,6 @@ SignalChain::~SignalChain()
 
 void SignalChain::prepare(double sampleRate, int blockSize)
 {
-    currentSampleRate = sampleRate;
-    currentBlockSize = blockSize;
-
     // Size the parallel-branch scratch once, off the audio thread. Stereo, the
     // chain's fixed channel layout. avoidReallocating=true keeps the storage
     // stable so the RT path never allocates.
@@ -227,6 +224,10 @@ void SignalChain::prepare(double sampleRate, int blockSize)
     accumScratch.setSize(2, blockSize, false, false, true);
 
     const juce::ScopedLock sl(lock);
+    // Published under the lock so addProcessor/replaceProcessor's under-lock
+    // stale-format check can't tear against a concurrent prepare.
+    currentSampleRate = sampleRate;
+    currentBlockSize = blockSize;
     for (auto* slot : slots)
     {
         invokePlugin(*slot, [&](juce::AudioProcessor& p)
@@ -452,15 +453,37 @@ int SignalChain::addProcessor(std::unique_ptr<juce::AudioProcessor> processor,
 
     // Prepare under the SEH-catching helper so a plugin that faults during
     // prepareToPlay is blocklisted (next load routes to the sandbox) and the
-    // slot is dropped, rather than taking the app down.
+    // slot is dropped, rather than taking the app down. Snapshot the playback
+    // format we prepare against: this runs OFF the audio lock on an N-API
+    // worker thread, and a device reconfigure can run prepare() concurrently —
+    // its slot loop won't see this slot (not added yet), so if the format
+    // moved we must re-prepare under the lock below or the slot stays at a
+    // stale sample rate / block size until the next device restart (heard as
+    // pitch-shifted/garbled monitoring after first-open races).
+    const double prepSr = currentSampleRate;
+    const int prepBs = currentBlockSize;
     invokePlugin(*slot, [&](juce::AudioProcessor& p)
     {
-        prepareForPlayback(p, currentSampleRate, currentBlockSize);
+        prepareForPlayback(p, prepSr, prepBs);
     });
     if (! slot->processor) return -1;
 
     int id = slot->id;
     const juce::ScopedLock sl(lock);
+    if (currentSampleRate != prepSr || currentBlockSize != prepBs)
+    {
+        fprintf(stderr,
+                "[SignalChain] addProcessor: device format changed during prepare "
+                "(%.0f/%d -> %.0f/%d) — re-preparing '%s'\n",
+                prepSr, prepBs, currentSampleRate, currentBlockSize,
+                slot->name.toRawUTF8());
+        invokePlugin(*slot, [&](juce::AudioProcessor& p)
+        {
+            p.releaseResources();
+            prepareForPlayback(p, currentSampleRate, currentBlockSize);
+        });
+        if (! slot->processor) return -1;
+    }
     slots.add(slot.release());
     return id;
 }
@@ -496,9 +519,11 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
     // does — under invokePlugin's SEH/signal guard so a fault in prepareToPlay is
     // contained (the processor is dropped) rather than taking the app down.
     staging.processor = std::move(processor);
+    const double prepSr = currentSampleRate;
+    const int prepBs = currentBlockSize;
     invokePlugin(staging, [&](juce::AudioProcessor& p)
     {
-        prepareForPlayback(p, currentSampleRate, currentBlockSize);
+        prepareForPlayback(p, prepSr, prepBs);
     });
     if (! staging.processor) return false;   // faulted during prepare → leave the slot as-is
 
@@ -507,6 +532,24 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
         const juce::ScopedLock sl(lock);
         const int idx = findSlotIndex(slotId);
         if (idx < 0) return false;           // slot was removed underneath us
+        // Same off-lock prepare race as addProcessor: a concurrent device
+        // reconfigure's prepare() couldn't have re-prepared the staging
+        // processor (it isn't in a slot yet). Re-prepare at the current format
+        // before it goes live.
+        if (currentSampleRate != prepSr || currentBlockSize != prepBs)
+        {
+            fprintf(stderr,
+                    "[SignalChain] replaceProcessor: device format changed during prepare "
+                    "(%.0f/%d -> %.0f/%d) — re-preparing '%s'\n",
+                    prepSr, prepBs, currentSampleRate, currentBlockSize,
+                    staging.name.toRawUTF8());
+            invokePlugin(staging, [&](juce::AudioProcessor& p)
+            {
+                p.releaseResources();
+                prepareForPlayback(p, currentSampleRate, currentBlockSize);
+            });
+            if (! staging.processor) return false;
+        }
         auto* slot = slots[idx];
         old = std::move(slot->processor);
         slot->processor = std::move(staging.processor);
