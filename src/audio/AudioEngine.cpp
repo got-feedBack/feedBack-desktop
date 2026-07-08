@@ -242,13 +242,6 @@ AudioEngine::DeviceOptions AudioEngine::probeDeviceOptionsDual(const juce::Strin
         options.input = inputName;
         options.output = outputName;
 
-        // userIntendsDuplex matches setAudioDevices's classification:
-        // identical names on both sides (typically both empty = OS default)
-        // means we'll go duplex regardless of which specific devices the
-        // first-enumerated lookup would have produced.
-        const bool userIntendsDuplex = (options.inputType == options.outputType
-                                        && options.input == options.output);
-
         // For probing we still need a concrete device to instantiate.
         // Resolve empty names to first-enumerated ONLY for the probe-device
         // creation below — DON'T write back into options.input/options.output;
@@ -261,25 +254,32 @@ AudioEngine::DeviceOptions AudioEngine::probeDeviceOptionsDual(const juce::Strin
         const juce::String probeOutputName =
             options.output.isEmpty() && outputs.size() > 0 ? outputs[0] : options.output;
 
-        const bool isDuplex = userIntendsDuplex
-                              || (options.inputType == options.outputType
-                                  && options.input == options.output
-                                  && options.input.isNotEmpty());
+        // Same backend type can usually be opened by one AudioDeviceManager even
+        // when the capture/render endpoint names differ (common for USB guitar
+        // cables: cable input + normal speakers). Probe that low-latency path
+        // first; split mode is only needed for different backend types or when
+        // the backend refuses a combined input/output device.
+        bool isDuplex = options.inputType == options.outputType;
 
         if (isDuplex)
         {
             std::unique_ptr<juce::AudioIODevice> dev(
                 inputType->createDevice(probeOutputName, probeInputName));
-            if (!dev) { options.error = "Could not create probe device"; options.compatible = false; return options; }
-
-            options.inputChannels = dev->getInputChannelNames();
-            options.outputChannels = dev->getOutputChannelNames();
-            for (auto rate : dev->getAvailableSampleRates())
-                options.sampleRates.addIfNotAlreadyThere(rate);
-            for (auto size : dev->getAvailableBufferSizes())
-                options.bufferSizes.addIfNotAlreadyThere(size);
+            if (dev)
+            {
+                options.inputChannels = dev->getInputChannelNames();
+                options.outputChannels = dev->getOutputChannelNames();
+                for (auto rate : dev->getAvailableSampleRates())
+                    options.sampleRates.addIfNotAlreadyThere(rate);
+                for (auto size : dev->getAvailableBufferSizes())
+                    options.bufferSizes.addIfNotAlreadyThere(size);
+            }
+            else
+            {
+                isDuplex = false;
+            }
         }
-        else
+        if (!isDuplex)
         {
             std::unique_ptr<juce::AudioIODevice> inDev(
                 inputType->createDevice({}, probeInputName));
@@ -665,18 +665,6 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
         return res;
     }
 
-    // User-intent duplex: both sides came in identical (typically both
-    // empty = "system default", or both naming the same explicit device).
-    // Capture before we resolve names, otherwise the resolve loop below
-    // fills empty-input with first-input-device and empty-output with
-    // first-output-device — those usually differ (especially on macOS
-    // where defaults are separate input/output devices), and the engine
-    // would silently route into split mode with ~85ms of ring-buffer
-    // latency for a config the user expected to be duplex. Legacy
-    // pre-PR settings commonly use empty names; preserve their behavior.
-    const bool userIntendsDuplex = (resolvedInputType == resolvedOutputType
-                                    && config.inputDevice == config.outputDevice);
-
     // Don't resolve empty names to first-device-of-each-type. Pre-PR
     // behavior — and Copilot's fail-closed concern — treat empty names
     // as "OS default" per side. Filling them with inputs[0] / outputs[0]
@@ -687,10 +675,9 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     const juce::String& resolvedInput  = config.inputDevice;
     const juce::String& resolvedOutput = config.outputDevice;
 
-    const bool isDuplex = userIntendsDuplex
-                          || (resolvedInputType == resolvedOutputType
-                              && resolvedInput == resolvedOutput
-                              && resolvedInput.isNotEmpty());
+    const bool sameBackendType = (resolvedInputType == resolvedOutputType);
+    const bool sameEndpointIntent = sameBackendType
+                                    && config.inputDevice == config.outputDevice;
 
     // Normalize before branching — applyDuplexSetup() only checks `> 0` and
     // would otherwise let Infinity (or NaN slipping past N-API) reach JUCE
@@ -705,30 +692,40 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     // (Extra input devices were closed by the stopAudio() above with their intent
     // kept; startAudio() below re-opens them at the new config — split mode only.)
 
-    if (isDuplex)
+    if (sameBackendType)
     {
         teardownSplitMode();
 
         const juce::String err = applyDuplexSetup(resolvedInput, resolvedOutput,
                                                   requestedSampleRate, requestedBufferSize);
-        if (err.isNotEmpty())
+        if (err.isEmpty())
+        {
+            duplexMode.store(true, std::memory_order_relaxed);
+
+            if (auto* dev = inputDeviceManager.getCurrentAudioDevice())
+            {
+                res.sampleRate = dev->getCurrentSampleRate();
+                res.inputBlockSize = dev->getCurrentBufferSizeSamples();
+                res.outputBlockSize = res.inputBlockSize;
+            }
+            res.ok = true;
+            res.duplex = true;
+        }
+        else if (sameEndpointIntent)
         {
             res.error = err;
             res.duplex = true;
             return res;
         }
-        duplexMode.store(true, std::memory_order_relaxed);
-
-        if (auto* dev = inputDeviceManager.getCurrentAudioDevice())
+        else
         {
-            res.sampleRate = dev->getCurrentSampleRate();
-            res.inputBlockSize = dev->getCurrentBufferSizeSamples();
-            res.outputBlockSize = res.inputBlockSize;
+            fprintf(stderr,
+                    "[AudioEngine] Same-type combined setup failed (%s); falling back to split mode\n",
+                    err.toRawUTF8());
         }
-        res.ok = true;
-        res.duplex = true;
     }
-    else
+
+    if (!res.ok)
     {
         DeviceConfig resolved = config;
         resolved.inputType = resolvedInputType;
