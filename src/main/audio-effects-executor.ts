@@ -1,7 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const PLAN_SCHEMA = 'slopsmith.audio_effects.chain_plan.v1';
+const PLAN_SCHEMA = 'feedBack.audio_effects.chain_plan.v1';
+// Pre-rebrand identifier. The renderer capability layer rewrites validated
+// plans to PLAN_SCHEMA, but older plugin bundles and direct callers may still
+// send the slopsmith-era id — accept it as an alias so the rebrand can't
+// silently break the executor handoff again.
+const LEGACY_PLAN_SCHEMA = 'slopsmith.audio_effects.chain_plan.v1';
 const DEFAULT_ROUTE_KEY = 'desktop-main';
 const MAX_STAGES = 24;
 const MAX_SEGMENTS = 80;
@@ -265,7 +270,7 @@ function validatePlan(request: unknown): { ok: true; plan: ValidPlan; presetJson
     }
 
     const schema = String(planInput.schema ?? '').trim();
-    if (schema !== PLAN_SCHEMA) errors.push('Unsupported audio-effects chain plan schema');
+    if (schema !== PLAN_SCHEMA && schema !== LEGACY_PLAN_SCHEMA) errors.push('Unsupported audio-effects chain plan schema');
 
     const routeKey = safeId(planInput.routeKey ?? planInput.route ?? DEFAULT_ROUTE_KEY, DEFAULT_ROUTE_KEY);
     const providerId = safeId(planInput.providerId, 'provider');
