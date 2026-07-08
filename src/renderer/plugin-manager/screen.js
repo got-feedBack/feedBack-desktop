@@ -5,7 +5,7 @@
     const plugins = window.feedBackDesktop?.plugins;
     if (!plugins) {
         const panel = document.getElementById('plugin-manager-panel');
-        if (panel) panel.innerHTML = '<div class="p-8 text-center text-slate-400">Plugin manager is only available in the Slopsmith Desktop app.</div>';
+        if (panel) panel.innerHTML = '<div class="p-8 text-center text-slate-400">Plugin manager is only available in the fee[dB]ack desktop app.</div>';
         return;
     }
 
@@ -30,7 +30,7 @@
             const installed = await plugins.listInstalled();
 
             if (installed.length === 0) {
-                listContainer.innerHTML = '<div class="text-sm text-slate-500 italic">No user-installed plugins. Official plugins are loaded from the Slopsmith server.</div>';
+                listContainer.innerHTML = '<div class="text-sm text-slate-500 italic">No user-installed plugins. Official plugins are loaded from the fee[dB]ack server.</div>';
                 return;
             }
 
@@ -136,7 +136,7 @@
             ${extraNote ? `<div class="text-amber-300 mb-1">${esc(extraNote)}</div>` : ''}
             <div class="text-slate-400">Other devices on your network can open:</div>
             <ul class="list-disc list-inside mt-1 space-y-0.5">${list}</ul>
-            <div class="text-slate-500 mt-2">Your OS firewall may prompt the first time — allow Slopsmith Desktop so other devices can connect.</div>
+            <div class="text-slate-500 mt-2">Your OS firewall may prompt the first time — allow fee[dB]ack so other devices can connect.</div>
         `;
         lanStatus.classList.remove('hidden');
     }

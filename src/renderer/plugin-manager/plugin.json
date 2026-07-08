@@ -2,7 +2,7 @@
     "id": "plugin_manager",
     "name": "Plugin Manager",
     "version": "0.1.1",
-    "description": "Install, update, and remove Slopsmith plugins",
+    "description": "Install, update, and remove fee[dB]ack plugins",
     "bundled": true,
     "nav": {
         "label": "Plugins",
