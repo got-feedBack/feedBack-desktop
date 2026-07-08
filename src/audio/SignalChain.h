@@ -63,7 +63,12 @@ public:
     // swaps under the audio lock; the old processor is torn down off the lock.
     // Returns false if the slot is gone or the incoming processor faulted in
     // prepareToPlay (in which case the existing processor is left untouched).
-    bool replaceProcessor(int slotId, std::unique_ptr<juce::AudioProcessor> processor);
+    // The OLD slot name/path are preserved during the prepare/fault window (so a
+    // fault is blocklisted against the right path); on SUCCESS, if newName/newPath
+    // are non-empty they replace the slot's identity so getChainState()/preset
+    // metadata reflect the swapped-in processor (used by replaceIR for cab swaps).
+    bool replaceProcessor(int slotId, std::unique_ptr<juce::AudioProcessor> processor,
+                          const juce::String& newName = {}, const juce::String& newPath = {});
     // Snapshot a slot's state for sandbox promotion, SAFELY. Runs hasEditor()
     // and getStateInformation() under the audio lock (so they can't race
     // process()'s processBlock on the same instance) and under the SEH/signal

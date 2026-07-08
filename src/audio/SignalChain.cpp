@@ -505,7 +505,8 @@ void SignalChain::removeProcessor(int slotId)
     if (idx >= 0) slots.remove(idx);
 }
 
-bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProcessor> processor)
+bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProcessor> processor,
+                                   const juce::String& newName, const juce::String& newPath)
 {
     if (!processor) return false;
 
@@ -562,6 +563,11 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
         auto* slot = slots[idx];
         old = std::move(slot->processor);
         slot->processor = std::move(staging.processor);
+        // Swap succeeded: adopt the new identity so getChainState()/preset save
+        // report the swapped-in processor, not the one it replaced. Only when
+        // provided — the sandbox-promotion caller passes none and keeps identity.
+        if (newName.isNotEmpty()) slot->name = newName;
+        if (newPath.isNotEmpty()) slot->path = newPath;
     }
     // Tear the old processor down OUTSIDE the audio lock: releaseResources() (and
     // a VST3 destructor) can block, and must never stall process() on it.

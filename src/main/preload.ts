@@ -402,6 +402,8 @@ const feedBackDesktopApi = {
         loadVST: (pluginPath: string) => ipcRenderer.invoke('audio:loadVST', pluginPath),
         loadNAMModel: (modelPath: string) => ipcRenderer.invoke('audio:loadNAMModel', modelPath),
         loadIR: (irPath: string) => ipcRenderer.invoke('audio:loadIR', irPath),
+        replaceIR: (slotId: number, irPath: string, gain?: number) =>
+            ipcRenderer.invoke('audio:replaceIR', slotId, irPath, gain),
         removeProcessor: (slotId: number) => ipcRenderer.invoke('audio:removeProcessor', slotId),
         moveProcessor: (from: number, to: number) => ipcRenderer.invoke('audio:moveProcessor', from, to),
         setBypass: (slotId: number, bypassed: boolean) => ipcRenderer.invoke('audio:setBypass', slotId, bypassed),
