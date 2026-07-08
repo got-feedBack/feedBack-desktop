@@ -14,10 +14,7 @@ namespace audiodiag {
 static std::atomic<uint32_t> primaryReentry{0};      // concurrent primary callback bodies seen
 static std::atomic<uint32_t> oversizedBlocks{0};     // numSamples > inputBlockSize on primary
 static std::atomic<uint32_t> outputOversized{0};     // numSamples > scratch on output callback
-static std::atomic<uint64_t> primaryBlocks{0};
-static std::atomic<uint64_t> outputBlocks{0};
 static constexpr uint32_t kFirstN = 25;              // per-anomaly log budget
-static constexpr uint64_t kHeartbeatBlocks = 512;    // ~5 s at 480-sample blocks
 inline bool firstN(std::atomic<uint32_t>& c) { return c.fetch_add(1, std::memory_order_relaxed) < kFirstN; }
 }
 
@@ -2271,21 +2268,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
                     numSamples, preparedBs);
     }
 
-    // DIAG heartbeat: every ~5 s of primary-clock audio, dump the numbers every
-    // open lead depends on (block size seen, ring fill, drop counters).
-    if ((audiodiag::primaryBlocks.fetch_add(1, std::memory_order_relaxed) % audiodiag::kHeartbeatBlocks) == 0)
-    {
-        const uint64_t w = outputRingWriteIndex.load(std::memory_order_relaxed);
-        const uint64_t r = outputRingReadIndex.load(std::memory_order_relaxed);
-        fprintf(stderr, "[diag] primary hb: ns=%d sr=%.0f prepBs=%d duplex=%d ringFill=%lld underflow=%llu overflow=%llu\n",
-                numSamples, currentSampleRate.load(std::memory_order_relaxed),
-                inputBlockSize.load(std::memory_order_relaxed),
-                (int) duplexMode.load(std::memory_order_relaxed),
-                (long long) (w - r),
-                (unsigned long long) outputUnderflowCount.load(std::memory_order_relaxed),
-                (unsigned long long) inputOverflowCount.load(std::memory_order_relaxed));
-    }
-
     const bool duplex = duplexMode.load(std::memory_order_relaxed);
 
     // Duplex writes outputData directly. Split runs DSP into a private 2-channel
@@ -2889,19 +2871,6 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
     constexpr uint64_t kMask = (uint64_t) kOutputRingFrames - 1;
     constexpr uint64_t kCap  = (uint64_t) kOutputRingFrames;
 
-    // DIAG heartbeat on the OUTPUT clock (split mode): consumption size vs ring
-    // fill. Sustained fill near capacity = producer overrun (e.g. double input
-    // callback); fill pinned at 0 with underflows climbing = producer starved.
-    if ((audiodiag::outputBlocks.fetch_add(1, std::memory_order_relaxed) % audiodiag::kHeartbeatBlocks) == 0)
-    {
-        const uint64_t dw = outputRingWriteIndex.load(std::memory_order_relaxed);
-        const uint64_t dr = outputRingReadIndex.load(std::memory_order_relaxed);
-        fprintf(stderr, "[diag] output hb: ns=%d outBs=%d ringFill=%lld underflow=%llu overflow=%llu\n",
-                numSamples, outputBlockSize.load(std::memory_order_relaxed),
-                (long long) (dw - dr),
-                (unsigned long long) outputUnderflowCount.load(std::memory_order_relaxed),
-                (unsigned long long) inputOverflowCount.load(std::memory_order_relaxed));
-    }
     if ((int) outputPullScratchL.size() < numSamples && audiodiag::firstN(audiodiag::outputOversized))
         fprintf(stderr, "[diag] output callback OVERSIZED block: numSamples=%d > scratch=%d\n",
                 numSamples, (int) outputPullScratchL.size());
