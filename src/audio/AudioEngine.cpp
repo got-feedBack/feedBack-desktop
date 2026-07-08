@@ -1189,13 +1189,21 @@ void AudioEngine::startAudio()
 
     // Input first so it has time to prefill the ring before the output
     // callback pulls — otherwise split mode underflows once at start.
-    inputDeviceManager.addAudioCallback(this);
+    //
+    // Same double-registration guard as the output side below: audioRunning is
+    // cleared by audioDeviceStopped() on a transient stop (WASAPI exclusive
+    // opens routinely fire one mid-start) while this callback stays attached,
+    // so an unguarded re-add here registered the INPUT callback twice — every
+    // block then ran the DSP twice and pushed into the split ring twice,
+    // playing each sample twice (half speed, one octave down, garbled), and
+    // stopAudio()'s single removeAudioCallback left a live registration behind
+    // that kept the device (exclusive!) open after "stop" and after app close.
+    if (!inputCallbackRegistered)
+    {
+        inputDeviceManager.addAudioCallback(this);
+        inputCallbackRegistered = true;
+    }
 
-    // Guard against double-registration: audioRunning can be cleared by
-    // audioDeviceStopped() on a transient input unplug while the output
-    // callback intentionally stays registered (JUCE auto-restart relies on
-    // that). A later startAudio() would then add the same callback again
-    // and JUCE would dispatch it twice per block.
     if (!duplexMode.load(std::memory_order_relaxed) && !outputCallbackRegistered)
     {
         outputDeviceManager.addAudioCallback(&outputCallback);
@@ -1232,6 +1240,7 @@ void AudioEngine::stopAudio()
     outputDeviceManager.removeAudioCallback(&outputCallback);
     outputCallbackRegistered = false;
     inputDeviceManager.removeAudioCallback(this);
+    inputCallbackRegistered = false;
     // Extra input devices are opened independently of startAudio(); close them here
     // too so a stopped engine never leaves a second interface capturing, feeding
     // detectors, and holding the hardware open in the background. KEEP their

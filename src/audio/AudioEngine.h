@@ -566,6 +566,12 @@ private:
     std::vector<float> outputPullScratchR;
     juce::AudioBuffer<float> outputBackingBuffer;
     bool outputCallbackRegistered = false;
+    // Same guard for the primary INPUT callback (`this`): audioRunning can be
+    // cleared by a transient audioDeviceStopped() while the callback stays
+    // attached, and an unguarded startAudio() re-add would dispatch it twice
+    // per block (double DSP + double ring push → half-speed garbled audio) and
+    // leave a live registration behind after stopAudio()'s single remove.
+    bool inputCallbackRegistered = false;
 
     // ── Phase 2: additional input devices ────────────────────────────────────
     // Each ADDITIONAL physical input device (a 2nd/3rd USB interface, e.g. two
