@@ -2499,7 +2499,10 @@ public:
         processor->prepareToPlay(sr, bs);
         if (! processor->loadIR(juce::File(juce::String(irPath_)))) { ok_ = false; return; }
 
-        ok_ = liveEngine->getSignalChain().replaceProcessor(slotId_, std::move(processor));
+        auto name = processor->getIRName();
+        ok_ = liveEngine->getSignalChain().replaceProcessor(
+                slotId_, std::move(processor),
+                "IR: " + name, juce::String(irPath_));
         if (ok_ && gain_ >= 0.0f)
             liveEngine->getSignalChain().setPostGain(slotId_, gain_);
     }
