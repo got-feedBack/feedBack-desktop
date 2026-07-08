@@ -2474,6 +2474,68 @@ static Napi::Value LoadIR(const Napi::CallbackInfo& info)
     return deferred.Promise();
 }
 
+// Replace the IR of an EXISTING convolution slot in place (cab swap / mic move),
+// so the rest of the chain — the amp VST above all — is NOT torn down and rebuilt.
+// Mirrors LoadIRWorker but calls SignalChain::replaceProcessor(slotId, …) instead
+// of addProcessor. Optional `gain` (>=0) updates the slot's post-gain (the cab
+// makeup); a negative gain leaves the existing post-gain untouched.
+class ReplaceIRWorker : public Napi::AsyncWorker
+{
+public:
+    ReplaceIRWorker(Napi::Env env, Napi::Promise::Deferred deferred,
+                    int slotId, std::string path, float gain)
+        : Napi::AsyncWorker(env), deferred_(deferred),
+          slotId_(slotId), irPath_(std::move(path)), gain_(gain) {}
+
+    void Execute() override
+    {
+        auto liveEngine = snapshotEngine();
+        if (!liveEngine) { ok_ = false; return; }
+
+        const auto sr = loadSafeSampleRate(*liveEngine);
+        const auto bs = loadSafeBlockSize(*liveEngine);
+        auto processor = std::make_unique<IRLoader>();
+        processor->setPlayConfigDetails(2, 2, sr, bs);
+        processor->prepareToPlay(sr, bs);
+        if (! processor->loadIR(juce::File(juce::String(irPath_)))) { ok_ = false; return; }
+
+        ok_ = liveEngine->getSignalChain().replaceProcessor(slotId_, std::move(processor));
+        if (ok_ && gain_ >= 0.0f)
+            liveEngine->getSignalChain().setPostGain(slotId_, gain_);
+    }
+
+    void OnOK() override { deferred_.Resolve(Napi::Boolean::New(Env(), ok_)); }
+    void OnError(const Napi::Error& e) override { deferred_.Reject(e.Value()); }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    int slotId_;
+    std::string irPath_;
+    float gain_;
+    bool ok_ = false;
+};
+
+static Napi::Value ReplaceIR(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto deferred = Napi::Promise::Deferred::New(env);
+
+    if (!snapshotEngine() || info.Length() < 2
+        || !info[0].IsNumber() || !info[1].IsString()) {
+        deferred.Resolve(Napi::Boolean::New(env, false));
+        return deferred.Promise();
+    }
+
+    const int slotId = info[0].As<Napi::Number>().Int32Value();
+    const auto irPath = info[1].As<Napi::String>().Utf8Value();
+    const float gain = (info.Length() >= 3 && info[2].IsNumber())
+        ? info[2].As<Napi::Number>().FloatValue() : -1.0f;
+
+    auto worker = new ReplaceIRWorker(env, deferred, slotId, irPath, gain);
+    worker->Queue();
+    return deferred.Promise();
+}
+
 static Napi::Value RemoveProcessor(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();
@@ -3496,6 +3558,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("loadVST", Napi::Function::New(env, LoadVST));
     exports.Set("loadNAMModel", Napi::Function::New(env, LoadNAMModel));
     exports.Set("loadIR", Napi::Function::New(env, LoadIR));
+    exports.Set("replaceIR", Napi::Function::New(env, ReplaceIR));
     exports.Set("removeProcessor", Napi::Function::New(env, RemoveProcessor));
     exports.Set("moveProcessor", Napi::Function::New(env, MoveProcessor));
     exports.Set("setBypass", Napi::Function::New(env, SetBypass));
