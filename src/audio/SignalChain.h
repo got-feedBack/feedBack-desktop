@@ -127,6 +127,11 @@ public:
 
 private:
     int findSlotIndex(int slotId) const;
+    // process() body for one block of at most currentBlockSize samples. Caller
+    // holds `lock`. Split out so process() can slice an oversized device block
+    // (WASAPI shared mode delivers them after a device start) into chunks the
+    // slots were actually prepared for.
+    void processLocked(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
 
     juce::OwnedArray<ProcessorSlot> slots;
     juce::CriticalSection lock;

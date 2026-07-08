@@ -259,6 +259,46 @@ void SignalChain::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mi
     const juce::ScopedTryLock sl(lock);
     if (!sl.isLocked()) return;
 
+    // Never hand a slot a block larger than the one it was prepared for.
+    // prepareToPlay's samplesPerBlock is a hard contract for VST3s, and the NAM
+    // core sizes its conv ring/output buffers to it with only a release-no-op
+    // assert guarding overruns — one oversized block (WASAPI shared mode
+    // delivers them right after a device start) permanently garbles its state.
+    // Slice the block into prepared-size chunks instead; each slot processes
+    // each chunk in sequence, preserving slot ordering per sample.
+    const int totalSamples = buffer.getNumSamples();
+    const int maxChunk = currentBlockSize > 0 ? currentBlockSize : totalSamples;
+    if (totalSamples <= maxChunk)
+    {
+        processLocked(buffer, midi);
+        return;
+    }
+
+    constexpr int kMaxSliceChannels = 8;
+    const int numChannels = buffer.getNumChannels();
+    if (numChannels > kMaxSliceChannels)
+    {
+        // Shouldn't happen (the chain runs stereo) — keep the legacy whole-block
+        // behaviour rather than dropping channels.
+        processLocked(buffer, midi);
+        return;
+    }
+
+    juce::MidiBuffer emptyMidi;
+    float* slicePtrs[kMaxSliceChannels];
+    for (int offset = 0; offset < totalSamples; offset += maxChunk)
+    {
+        const int chunk = juce::jmin(maxChunk, totalSamples - offset);
+        for (int ch = 0; ch < numChannels; ++ch)
+            slicePtrs[ch] = buffer.getWritePointer(ch) + offset;
+        juce::AudioBuffer<float> slice(slicePtrs, numChannels, chunk);
+        // MIDI (all stamped at sample 0) goes to the first slice only.
+        processLocked(slice, offset == 0 ? midi : emptyMidi);
+    }
+}
+
+void SignalChain::processLocked(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
     // Drain pending MIDI messages from the lock-free queue
     struct DrainedMsg { int slotId; juce::MidiMessage msg; };
     DrainedMsg drained[kMidiQueueSize];
