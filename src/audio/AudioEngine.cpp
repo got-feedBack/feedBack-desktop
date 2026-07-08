@@ -692,7 +692,16 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     // (Extra input devices were closed by the stopAudio() above with their intent
     // kept; startAudio() below re-opens them at the new config — split mode only.)
 
-    if (sameBackendType)
+    // Only attempt the low-latency COMBINED (duplex) device when input and output
+    // are the SAME physical endpoint — a true single-clock duplex device. Two
+    // DIFFERENT endpoints of the same backend (e.g. a USB guitar cable in + separate
+    // speakers out) are independent hardware clocks; forcing them through one duplex
+    // device proved unstable across the app lifecycle (no audio until an explicit
+    // Apply, then distortion / dropouts / silent-in-song on navigation). Those route
+    // through the split path, whose ring buffer bridges the two clocks. Cross-backend
+    // pairs split too. (Low-latency for the two-device case is a separate follow-up —
+    // it needs the device-lifecycle work: startup restore + reconfigure-on-nav.)
+    if (sameEndpointIntent)
     {
         teardownSplitMode();
 
@@ -711,17 +720,13 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
             res.ok = true;
             res.duplex = true;
         }
-        else if (sameEndpointIntent)
+        else
         {
+            // A same-device config that can't open combined is a real error, not a
+            // reason to silently fall to split (which would misrepresent the intent).
             res.error = err;
             res.duplex = true;
             return res;
-        }
-        else
-        {
-            fprintf(stderr,
-                    "[AudioEngine] Same-type combined setup failed (%s); falling back to split mode\n",
-                    err.toRawUTF8());
         }
     }
 
