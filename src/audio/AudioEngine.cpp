@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 #include "AudioSanitize.h"
+#include "VSTTrace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1249,7 +1250,8 @@ void AudioEngine::startAudio()
 
 void AudioEngine::stopAudio()
 {
-    fprintf(stderr, "[diag] stopAudio: audioRunning=%d inputCbReg=%d outputCbReg=%d\n",
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] stopAudio: audioRunning=%d inputCbReg=%d outputCbReg=%d\n",
             (int) audioRunning.load(std::memory_order_relaxed),
             (int) inputCallbackRegistered, (int) outputCallbackRegistered);
     // Always attempt to detach both callbacks — removeAudioCallback is
@@ -1800,7 +1802,8 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     audioRunning.store(true, std::memory_order_relaxed);
     const double sr = device->getCurrentSampleRate();
     const int bs = device->getCurrentBufferSizeSamples();
-    fprintf(stderr, "[diag] audioDeviceAboutToStart: dev='%s' sr=%.0f bs=%d duplex=%d inputCbReg=%d outputCbReg=%d\n",
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioDeviceAboutToStart: dev='%s' sr=%.0f bs=%d duplex=%d inputCbReg=%d outputCbReg=%d\n",
             device->getName().toRawUTF8(), sr, bs,
             (int) duplexMode.load(std::memory_order_relaxed),
             (int) inputCallbackRegistered, (int) outputCallbackRegistered);
@@ -1876,7 +1879,8 @@ void AudioEngine::audioDeviceStopped()
     // sources: an EXTRA-device source is processed by that device's own callback,
     // which may still be running on its own thread — releasing it here would race.
     // Extra sources are released by extraInputStopped()/unbindInputDevice().
-    fprintf(stderr, "[diag] audioDeviceStopped (audioRunning cleared; callbacks stay attached for JUCE auto-restart)\n");
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioDeviceStopped (audioRunning cleared; callbacks stay attached for JUCE auto-restart)\n");
     audioRunning.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(sourcesMutex);
@@ -1909,7 +1913,8 @@ void AudioEngine::audioDeviceStopped()
 void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
 {
     const int bs = device->getCurrentBufferSizeSamples();
-    fprintf(stderr, "[diag] audioOutputAboutToStart: dev='%s' sr=%.0f bs=%d\n",
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioOutputAboutToStart: dev='%s' sr=%.0f bs=%d\n",
             device->getName().toRawUTF8(), device->getCurrentSampleRate(), bs);
     outputBlockSize.store(bs, std::memory_order_relaxed);
 
@@ -1975,7 +1980,8 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
 
 void AudioEngine::audioOutputStopped()
 {
-    fprintf(stderr, "[diag] audioOutputStopped\n");
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioOutputStopped\n");
     // No-op by design. The consumer's catch-up branch in audioOutputCallback
     // handles both (w - r) > cap (producer lapped during the stop) and
     // w < r (a future reset race) on the next output start, so we don't

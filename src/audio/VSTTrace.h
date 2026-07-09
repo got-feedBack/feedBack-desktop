@@ -21,6 +21,16 @@
 #include <mutex>
 
 #if defined(_WIN32)
+  // Keep windows.h from defining min/max macros that clobber std::min /
+  // std::max in any TU that includes this header (NOMINMAX only helps if
+  // nothing else included windows.h first — WIN32_LEAN_AND_MEAN keeps the
+  // surface small either way).
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
   #include <windows.h>
 #else
   #include <unistd.h>
