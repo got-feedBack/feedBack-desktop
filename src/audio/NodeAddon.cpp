@@ -54,6 +54,32 @@ static void cancelAllPendingLoads();
 static std::shared_ptr<AudioEngine> engine;
 static std::mutex engineMutex;
 
+// Decode a state blob that may be in EITHER base64 flavour. JUCE's
+// MemoryBlock::fromBase64Encoding only understands JUCE's own proprietary
+// format ("<size>.<juce-alphabet>") and returns false for standard RFC-4648
+// base64 — which is what the Python-side plugins (rig_builder et al.) emit
+// for per-slot state. That silent false meant setState() was never called
+// for those slots: IR stages lost their per-stage `gain` (the cab loudness
+// makeup and amp trims never reached the engine). Try the JUCE format first
+// (engine-native saves), then fall back to standard b64.
+//
+// `allowStandard` is only set for IR/NAM slots: their processors take a JSON
+// state ({"irPath","gain"} / model path), which is exactly what the plugins
+// emit. VST slots keep the JUCE-only decode — their plugin-emitted blobs are
+// metadata wrappers, not real setStateInformation() chunks, and feeding those
+// to a VST3 for the first time would be an unasked-for behaviour change.
+static bool decodeStateBlob(const juce::String& s, juce::MemoryBlock& mb,
+                            bool allowStandard)
+{
+    if (mb.fromBase64Encoding(s) && mb.getSize() > 0)
+        return true;
+    if (!allowStandard)
+        return false;
+    mb.reset();
+    juce::MemoryOutputStream mo(mb, false);
+    return juce::Base64::convertFromBase64(mo, s) && mb.getSize() > 0;
+}
+
 static std::shared_ptr<AudioEngine> snapshotEngine()
 {
     std::lock_guard<std::mutex> lock(engineMutex);
@@ -3079,8 +3105,12 @@ static Napi::Value SetSlotState(const Napi::CallbackInfo& info)
     {
         int slotId = info[0].As<Napi::Number>().Int32Value();
         auto base64 = info[1].As<Napi::String>().Utf8Value();
+        const auto* slot = liveEngine->getSignalChain().getSlot(slotId);
+        const bool allowStandard = slot != nullptr
+            && (slot->type == ProcessorSlot::Type::IR
+                || slot->type == ProcessorSlot::Type::NAM);
         juce::MemoryBlock mb;
-        if (mb.fromBase64Encoding(juce::String(base64)) && mb.getSize() > 0)
+        if (decodeStateBlob(juce::String(base64), mb, allowStandard))
             liveEngine->getSignalChain().setSlotState(slotId, mb);
     }
     return info.Env().Undefined();
@@ -3305,11 +3335,16 @@ public:
                     liveEngine->getSignalChain().setBranchSrc(slotId, (int)slotObj->getProperty("branchSrc"));
             }
 
-            // Restore processor state
+            // Restore processor state (JUCE-format base64; IR/NAM slots also
+            // accept standard base64 — see decodeStateBlob: their plugin-
+            // emitted JSON states were silently dropped before, so IR stages
+            // never got their per-stage gain).
             if (stateB64.isNotEmpty() && slotId >= 0)
             {
+                const bool allowStandard = type == (int)ProcessorSlot::Type::IR
+                                        || type == (int)ProcessorSlot::Type::NAM;
                 juce::MemoryBlock state;
-                if (state.fromBase64Encoding(stateB64))
+                if (decodeStateBlob(stateB64, state, allowStandard))
                 {
                     auto* slot = const_cast<ProcessorSlot*>(liveEngine->getSignalChain().getSlot(slotId));
                     if (slot) slot->setState(state);
