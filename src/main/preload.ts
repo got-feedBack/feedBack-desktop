@@ -365,6 +365,19 @@ const feedBackDesktopApi = {
             ipcRenderer.invoke('audio:setStreamBus', includeBacking, includeGuitar, gain),
         setStreamBusGain: (gain: number): Promise<void> =>
             ipcRenderer.invoke('audio:setStreamBusGain', gain),
+        // Renderer-audio bus (Phase 2): feed the WebAudio master into the
+        // engine output so song audio survives exclusive-mode output.
+        setRendererBus: (enabled: boolean, gain: number): Promise<void> =>
+            ipcRenderer.invoke('audio:setRendererBus', enabled, gain),
+        // Fire-and-forget by design — called ~50-100×/s from the capture
+        // worklet's drain loop; check getRendererBusMetrics() for health.
+        pushRendererAudio: (interleavedLR: Float32Array, sourceRate: number): void =>
+            ipcRenderer.send('audio:pushRendererAudio', interleavedLR, sourceRate),
+        getRendererBusMetrics: (): Promise<{
+            enabled: boolean; fillFrames: number; capacityFrames: number;
+            pushedFrames: number; consumedFrames: number;
+            underflowCount: number; overflowCount: number;
+        } | null> => ipcRenderer.invoke('audio:getRendererBusMetrics'),
         getStreamSinkLevel: (): Promise<number> => ipcRenderer.invoke('audio:getStreamSinkLevel'),
         isStreamOutputActive: (): Promise<boolean> => ipcRenderer.invoke('audio:isStreamOutputActive'),
         getStreamUnderflowCount: (): Promise<number> => ipcRenderer.invoke('audio:getStreamUnderflowCount'),

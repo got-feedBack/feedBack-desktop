@@ -1414,6 +1414,59 @@ static Napi::Value SetStreamBusGain(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+// setRendererBus(enabled:boolean, gain:number)
+static Napi::Value SetRendererBus(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() >= 2 && info[0].IsBoolean() && info[1].IsNumber())
+        liveEngine->setRendererBus(info[0].As<Napi::Boolean>().Value(),
+                                   (float) info[1].As<Napi::Number>().DoubleValue());
+    return info.Env().Undefined();
+}
+
+// pushRendererAudio(interleavedLR:Float32Array, sourceRate:number) -> boolean
+// Interleaved stereo (L0 R0 L1 R1 …); sourceRate is the renderer's
+// AudioContext sample rate. Returns false when the bus is off / engine down /
+// malformed args, so the renderer can stop pushing.
+static Napi::Value PushRendererAudio(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine || info.Length() < 2 || !info[0].IsTypedArray() || !info[1].IsNumber())
+        return Napi::Boolean::New(env, false);
+    auto ta = info[0].As<Napi::TypedArray>();
+    if (ta.TypedArrayType() != napi_float32_array)
+        return Napi::Boolean::New(env, false);
+    auto f32 = info[0].As<Napi::Float32Array>();
+    const size_t samples = f32.ElementLength();
+    if (samples < 2)
+        return Napi::Boolean::New(env, false);
+    const int frames = (int) (samples / 2);
+    const bool ok = liveEngine->pushRendererAudio(
+        f32.Data(), frames, info[1].As<Napi::Number>().DoubleValue());
+    return Napi::Boolean::New(env, ok);
+}
+
+// getRendererBusMetrics() -> {enabled, fillFrames, capacityFrames,
+//                             pushedFrames, consumedFrames,
+//                             underflowCount, overflowCount}
+static Napi::Value GetRendererBusMetrics(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto liveEngine = snapshotEngine();
+    auto obj = Napi::Object::New(env);
+    if (!liveEngine) return obj;
+    const auto m = liveEngine->getRendererBusMetrics();
+    obj.Set("enabled", m.enabled);
+    obj.Set("fillFrames", m.fillFrames);
+    obj.Set("capacityFrames", m.capacityFrames);
+    obj.Set("pushedFrames", (double) m.pushedFrames);
+    obj.Set("consumedFrames", (double) m.consumedFrames);
+    obj.Set("underflowCount", (double) m.underflowCount);
+    obj.Set("overflowCount", (double) m.overflowCount);
+    return obj;
+}
+
 // getStreamSinkLevel() -> number (peak 0..1+)
 static Napi::Value GetStreamSinkLevel(const Napi::CallbackInfo& info)
 {
@@ -3565,6 +3618,9 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("clearStreamOutput", Napi::Function::New(env, ClearStreamOutput));
     exports.Set("setStreamBus", Napi::Function::New(env, SetStreamBus));
     exports.Set("setStreamBusGain", Napi::Function::New(env, SetStreamBusGain));
+    exports.Set("setRendererBus", Napi::Function::New(env, SetRendererBus));
+    exports.Set("pushRendererAudio", Napi::Function::New(env, PushRendererAudio));
+    exports.Set("getRendererBusMetrics", Napi::Function::New(env, GetRendererBusMetrics));
     exports.Set("getStreamSinkLevel", Napi::Function::New(env, GetStreamSinkLevel));
     exports.Set("isStreamOutputActive", Napi::Function::New(env, IsStreamOutputActive));
     exports.Set("getStreamUnderflowCount", Napi::Function::New(env, GetStreamUnderflowCount));

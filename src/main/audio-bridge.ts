@@ -862,6 +862,31 @@ export function initAudioBridge(): void {
         }
     });
 
+    // ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ────────
+    ipcMain.handle('audio:setRendererBus', (_event, enabled: unknown, gain: unknown) => {
+        if (audio && typeof audio.setRendererBus === 'function') {
+            const en = enabled === true;
+            const g = typeof gain === 'number' && Number.isFinite(gain) ? gain : 1.0;
+            audio.setRendererBus(en, g);
+        }
+    });
+
+    // Push path uses `on` (fire-and-forget), not `handle`: chunks arrive ~50-100×
+    // per second and an invoke round-trip per chunk doubles the IPC cost for a
+    // reply nobody reads. Health is observed via getRendererBusMetrics instead.
+    ipcMain.on('audio:pushRendererAudio', (_event, chunk: unknown, sourceRate: unknown) => {
+        if (audio && typeof audio.pushRendererAudio === 'function'
+            && chunk instanceof Float32Array && chunk.length >= 2) {
+            const rate = typeof sourceRate === 'number' && Number.isFinite(sourceRate) ? sourceRate : 0;
+            audio.pushRendererAudio(chunk, rate);
+        }
+    });
+
+    ipcMain.handle('audio:getRendererBusMetrics', () => {
+        if (!audio || typeof audio.getRendererBusMetrics !== 'function') return null;
+        return audio.getRendererBusMetrics();
+    });
+
     ipcMain.handle('audio:getStreamSinkLevel', () => {
         if (!audio || typeof audio.getStreamSinkLevel !== 'function') return 0;
         return audio.getStreamSinkLevel();

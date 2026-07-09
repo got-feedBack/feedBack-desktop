@@ -257,6 +257,40 @@ public:
         streamBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed);
     }
     void setStreamBusGain(float gain) { streamBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed); }
+
+    // ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ─────────
+    // The renderer pushes its WebAudio master mix here (via IPC) so song/stem
+    // audio stays audible when the output device is exclusive-style and the OS
+    // mixer path is silenced. SPSC: producer is the main-process IPC thread,
+    // consumer is whichever output callback is live (duplex or split). Default
+    // off → zero behaviour change.
+    void setRendererBus(bool enabled, float gain)
+    {
+        rendererBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed);
+        const bool was = rendererBusEnabled.exchange(enabled, std::memory_order_acq_rel);
+        if (was && !enabled)
+        {
+            // Drop buffered audio on disable so a later re-enable starts fresh
+            // instead of playing a stale tail. Consumer tolerates the jump.
+            rendererBusReadIndex.store(
+                rendererBusWriteIndex.load(std::memory_order_acquire),
+                std::memory_order_release);
+            rendererBusPrimed.store(false, std::memory_order_relaxed);
+        }
+    }
+    // Interleaved stereo frames at `sourceRate`; linear-resampled to the device
+    // rate on the producer thread (fractional position + previous frame carried
+    // across calls). Returns false when the bus is disabled or the engine is
+    // not running. Drop-oldest on overflow, counted.
+    bool pushRendererAudio(const float* interleavedLR, int frames, double sourceRate);
+    struct RendererBusMetrics
+    {
+        uint64_t pushedFrames = 0, consumedFrames = 0, underflowCount = 0, overflowCount = 0;
+        int fillFrames = 0, capacityFrames = 0;
+        bool enabled = false;
+    };
+    RendererBusMetrics getRendererBusMetrics() const;
+
     float getStreamSinkLevel() const { return streamSinkLevel.load(std::memory_order_relaxed); }
     uint64_t getStreamUnderflowCount() const { return streamSink.underflowCount.load(std::memory_order_relaxed); }
     // Producer overflow (drop-oldest): the consumer fell a full ring behind and
@@ -555,6 +589,40 @@ private:
         l = std::bit_cast<float>(static_cast<uint32_t>(v & 0xFFFFFFFFu));
         r = std::bit_cast<float>(static_cast<uint32_t>(v >> 32));
     }
+
+    // ── Renderer-audio bus ring (see setRendererBus/pushRendererAudio) ───────
+    // Same packed-LR SPSC design as outputPendingRing. Sized generously
+    // (~1.5 s @ 48 kHz — vs outputPendingRing's 85 ms) because the producer is
+    // an IPC thread with scheduling jitter, not another audio callback; the
+    // consumer trims steady-state fill via the drift clamp in the mix step.
+    static constexpr int kRendererBusFrames = 65536;
+    static_assert((kRendererBusFrames & (kRendererBusFrames - 1)) == 0,
+                  "kRendererBusFrames must be a power of two for mask wraparound");
+    // Prefill gate: consume nothing until the producer has built this cushion
+    // (~10.7 ms @ 48 kHz); re-armed after every underflow so stall recovery is
+    // one clean gap. Fill clamp: fill beyond this (~85 ms) means a renderer
+    // stall dumped a backlog — trim to the prime target, don't play the tail.
+    static constexpr int kRendererBusPrimeFrames   = 512;
+    static constexpr int kRendererBusMaxFillFrames = 4096;
+    std::array<std::atomic<uint64_t>, kRendererBusFrames> rendererBusRing{};
+    std::atomic<uint64_t> rendererBusWriteIndex{0};
+    std::atomic<uint64_t> rendererBusReadIndex{0};
+    std::atomic<uint64_t> rendererBusPushedFrames{0};
+    std::atomic<uint64_t> rendererBusConsumedFrames{0};
+    std::atomic<uint64_t> rendererBusUnderflowCount{0};
+    std::atomic<uint64_t> rendererBusOverflowCount{0};
+    std::atomic<bool>  rendererBusEnabled{false};
+    std::atomic<float> rendererBusGain{1.0f};
+    // Consumer-side prefill-gate state. Only the live output callback touches
+    // it, but duplex/split hand-offs cross threads — atomic keeps that safe.
+    std::atomic<bool>  rendererBusPrimed{false};
+    // Producer-thread-only linear-resampler state (fractional read position
+    // into the incoming chunk + the previous chunk's last frame for
+    // interpolation continuity across pushes).
+    double rendererBusSrcPos = 0.0;
+    float  rendererBusPrevL = 0.0f, rendererBusPrevR = 0.0f;
+    // Shared consumer step for the duplex and split output paths.
+    void mixRendererBusInto(juce::AudioBuffer<float>& buffer, int numSamples, int mixChannels);
 
     std::atomic<uint64_t> outputRingWriteIndex{0};
     std::atomic<uint64_t> outputRingReadIndex{0};

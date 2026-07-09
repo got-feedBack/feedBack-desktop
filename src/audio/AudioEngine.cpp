@@ -2366,6 +2366,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
                                     streamBackingOn ? &backingBuffer : nullptr,
                                     streamBackingFrames, streamBackingVol, numSamples);
 
+        // Renderer bus (duplex clock): mixed like backing — after the stream
+        // snapshot (the stream submix must not double-carry song audio the
+        // renderer also feeds), before the master gain.
+        mixRendererBusInto(buffer, numSamples, juce::jmin(numOutputChannels, 2));
+
         // Apply output gain
         buffer.applyGain(outputGain.load());
 
@@ -3031,6 +3036,9 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
                                     streamBackingFrames, streamBackingVol, numSamples);
     }
 
+    // Renderer bus (split clock): mixed like backing — before the master gain.
+    mixRendererBusInto(buffer, numSamples, copyChannels);
+
     buffer.applyGain(outputGain.load());
 
     float peak = 0.0f;
@@ -3039,4 +3047,131 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
     currentOutputLevel.store(peak);
     float prevPeak = outputPeak.load();
     if (peak > prevPeak) outputPeak.store(peak);
+}
+
+// ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ────────────
+
+bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, double sourceRate)
+{
+    if (!rendererBusEnabled.load(std::memory_order_acquire)) return false;
+    if (interleavedLR == nullptr || frames <= 0) return false;
+    const double deviceRate = getCurrentSampleRate();
+    if (deviceRate <= 0.0) return false;
+    if (!(sourceRate > 0.0)) sourceRate = deviceRate;
+
+    constexpr uint64_t kMask = kRendererBusFrames - 1;
+    uint64_t w = rendererBusWriteIndex.load(std::memory_order_relaxed);
+
+    // Linear resample source→device rate on this (IPC) thread. `pos` is the
+    // fractional read position into the incoming chunk; index -1 refers to the
+    // carried last frame of the previous chunk so interpolation is continuous
+    // across pushes. Equal rates degenerate to step == 1.0 (still exact:
+    // pos stays integral, frac == 0).
+    const double step = sourceRate / deviceRate;
+    double pos = rendererBusSrcPos;
+    uint64_t written = 0;
+    while (true)
+    {
+        const double ip = std::floor(pos);
+        const int i0 = (int) ip;
+        if (i0 + 1 >= frames) break;                 // next chunk continues from here
+        const float frac = (float) (pos - ip);
+        const float l0 = (i0 < 0) ? rendererBusPrevL : interleavedLR[(size_t) i0 * 2];
+        const float r0 = (i0 < 0) ? rendererBusPrevR : interleavedLR[(size_t) i0 * 2 + 1];
+        const float l1 = interleavedLR[((size_t) i0 + 1) * 2];
+        const float r1 = interleavedLR[((size_t) i0 + 1) * 2 + 1];
+        rendererBusRing[(size_t) (w & kMask)].store(
+            packLR(l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac),
+            std::memory_order_relaxed);
+        ++w;
+        ++written;
+        pos += step;
+    }
+    rendererBusSrcPos = pos - (double) frames;       // relative to the next chunk
+    rendererBusPrevL = interleavedLR[((size_t) frames - 1) * 2];
+    rendererBusPrevR = interleavedLR[((size_t) frames - 1) * 2 + 1];
+
+    // Publish. Overflow (producer lapping the consumer) is handled consumer-
+    // side with drop-oldest — same contract as the extra-input rings — so only
+    // the consumer ever moves readIndex.
+    rendererBusWriteIndex.store(w, std::memory_order_release);
+    rendererBusPushedFrames.fetch_add(written, std::memory_order_relaxed);
+    return true;
+}
+
+void AudioEngine::mixRendererBusInto(juce::AudioBuffer<float>& buffer, int numSamples, int mixChannels)
+{
+    if (!rendererBusEnabled.load(std::memory_order_acquire)) return;
+    constexpr uint64_t kMask = kRendererBusFrames - 1;
+    const uint64_t w = rendererBusWriteIndex.load(std::memory_order_acquire);
+    uint64_t r = rendererBusReadIndex.load(std::memory_order_relaxed);
+    if (w - r > (uint64_t) kRendererBusFrames)
+    {
+        // Producer lapped us — drop-oldest to the newest full ring.
+        r = w - (uint64_t) kRendererBusFrames;
+        rendererBusOverflowCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t avail = w - r;
+
+    // Fill clamp (spike finding): steady-state drift is near zero, so a fill
+    // beyond kRendererBusMaxFill only ever means a renderer stall dumped a
+    // backlog. Trim to the prime target instead of playing the whole tail at
+    // ~85+ ms behind — a latency reset, not an audible gap.
+    if (avail > (uint64_t) kRendererBusMaxFillFrames)
+    {
+        r = w - (uint64_t) kRendererBusPrimeFrames;
+        avail = (uint64_t) kRendererBusPrimeFrames;
+        rendererBusOverflowCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Prefill gate (spike finding): the warmup underflow burst is the mix
+    // starting before the ring has a cushion. Consume nothing until the
+    // producer has built ~10 ms; re-arm the same gate after a real underflow
+    // so stall recovery is one clean gap, not a ragged refill.
+    if (!rendererBusPrimed)
+    {
+        if (avail < (uint64_t) kRendererBusPrimeFrames)
+        {
+            rendererBusReadIndex.store(r, std::memory_order_release);
+            return;
+        }
+        rendererBusPrimed = true;
+    }
+    if (avail < (uint64_t) numSamples)
+    {
+        // Underflow: emit silence for the whole block (partial blocks blip),
+        // drop what's buffered, and go back to priming.
+        rendererBusPrimed = false;
+        rendererBusUnderflowCount.fetch_add(1, std::memory_order_relaxed);
+        rendererBusReadIndex.store(w, std::memory_order_release);
+        return;
+    }
+
+    const int pull = numSamples;
+    const int chans = juce::jmin(mixChannels, buffer.getNumChannels());
+    const float g = rendererBusGain.load(std::memory_order_relaxed);
+    for (int i = 0; i < pull; ++i)
+    {
+        float l, rr;
+        unpackLR(rendererBusRing[(size_t) ((r + (uint64_t) i) & kMask)].load(std::memory_order_relaxed), l, rr);
+        buffer.addSample(0, i, l * g);
+        if (chans > 1) buffer.addSample(1, i, rr * g);
+    }
+    rendererBusReadIndex.store(r + (uint64_t) pull, std::memory_order_release);
+    rendererBusConsumedFrames.fetch_add((uint64_t) pull, std::memory_order_relaxed);
+}
+
+AudioEngine::RendererBusMetrics AudioEngine::getRendererBusMetrics() const
+{
+    RendererBusMetrics m;
+    m.pushedFrames   = rendererBusPushedFrames.load(std::memory_order_relaxed);
+    m.consumedFrames = rendererBusConsumedFrames.load(std::memory_order_relaxed);
+    m.underflowCount = rendererBusUnderflowCount.load(std::memory_order_relaxed);
+    m.overflowCount  = rendererBusOverflowCount.load(std::memory_order_relaxed);
+    const uint64_t w = rendererBusWriteIndex.load(std::memory_order_acquire);
+    const uint64_t r = rendererBusReadIndex.load(std::memory_order_acquire);
+    m.fillFrames = (int) juce::jmin(w - r, (uint64_t) kRendererBusFrames);
+    m.capacityFrames = kRendererBusFrames;
+    m.enabled = rendererBusEnabled.load(std::memory_order_relaxed);
+    return m;
 }
