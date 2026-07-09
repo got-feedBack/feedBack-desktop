@@ -909,16 +909,39 @@ function installRendererPermissions(rendererPort: number): void {
 // or a throw must not block startup — the engine still runs output-only and the
 // renderer surfaces the missing-input state through the normal device UI.
 async function ensureMicrophoneAccess(): Promise<void> {
-    if (process.platform !== 'darwin') return;
+    if (process.platform !== 'darwin') {
+        console.log('[main] ensureMicrophoneAccess: platform !== darwin, skipping');
+        return;
+    }
     // Only run in a packaged app. NSMicrophoneUsageDescription is injected by
     // electron-builder via extendInfo in package.json and is only present in
     // the built .app bundle. Calling askForMediaAccess() without that Info.plist
     // key in an unpackaged dev run (npm start / plain Electron.app) terminates
     // the process instead of throwing — the try/catch does not catch it.
-    if (!app.isPackaged) return;
+    if (!app.isPackaged) {
+        console.log('[main] ensureMicrophoneAccess: app.isPackaged === false, skipping (NSMicrophoneUsageDescription may be absent)');
+        return;
+    }
     try {
         const status = systemPreferences.getMediaAccessStatus('microphone');
-        if (status === 'granted') return;
+        console.log(`[main] ensureMicrophoneAccess: getMediaAccessStatus returned '${status}'`);
+
+        if (status === 'granted') {
+            // TCC database has a grant for this bundle ID, BUT macOS enforces
+            // the grant against the code signature — a stale entry (keyed to a
+            // different signature from an earlier build) reports 'granted' here
+            // while CoreAudio still delivers zeroed input. Log bundle and
+            // packaging details so the debug log can diagnose signature-mismatch
+            // vs. genuine grant.
+            const name = app.getName();
+            const ver = app.getVersion();
+            const pkg = app.isPackaged;
+            const resPath = app.getPath('exe');
+            console.log(`[main] Microphone access: 'granted' (early return — app="${name}" v${ver} packaged=${pkg} exe="${resPath}")`);
+            console.log('[main] ensureMicrophoneAccess: returning early — status is granted, no askForMediaAccess call');
+            return;
+        }
+
         if (status === 'denied' || status === 'restricted') {
             // Already a hard 'denied'/'restricted' verdict — askForMediaAccess
             // resolves false without re-prompting. Surface it so the log
@@ -928,12 +951,26 @@ async function ensureMicrophoneAccess(): Promise<void> {
                 'Enable fee[dB]ack under System Settings → Privacy & Security → Microphone.');
             return;
         }
+
         // status === 'not-determined' → this triggers the one-time OS prompt.
+        console.log('[main] Microphone access: status is not-determined, calling askForMediaAccess (system prompt should appear)');
         const granted = await systemPreferences.askForMediaAccess('microphone');
         console.log(`[main] Microphone access ${granted ? 'granted' : 'denied'} by user.`);
+
+        if (!granted) {
+            // User denied the prompt — log extra context so we can distinguish
+            // "user clicked Don't Allow" from "prompt never appeared / resolved false".
+            console.warn('[main] Microphone access: user denied the permission prompt. Input will be silent.');
+        }
     } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         console.warn(`[main] Microphone access request failed: ${msg}`);
+        // Log the full error stack if available — the try/catch above may not
+        // catch a process termination (missing NSMicrophoneUsageDescription),
+        // but anything that does reach here should be diagnosable.
+        if (e instanceof Error && e.stack) {
+            console.warn(`[main] Microphone access error stack: ${e.stack}`);
+        }
     }
 }
 
