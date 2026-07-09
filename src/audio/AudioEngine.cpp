@@ -1,10 +1,23 @@
 #include "AudioEngine.h"
 #include "AudioSanitize.h"
+#include "VSTTrace.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <thread>
+
+// ── Diagnostic instrumentation (tester builds) ────────────────────────────────
+// Every counter is a file-static atomic so the RT paths stay allocation-free.
+// First-N logging for anomalies (so a storm can't flood the log) + a periodic
+// stats heartbeat every ~5 s of processed audio on each callback clock.
+namespace audiodiag {
+static std::atomic<uint32_t> primaryReentry{0};      // concurrent primary callback bodies seen
+static std::atomic<uint32_t> oversizedBlocks{0};     // numSamples > inputBlockSize on primary
+static std::atomic<uint32_t> outputOversized{0};     // numSamples > scratch on output callback
+static constexpr uint32_t kFirstN = 25;              // per-anomaly log budget
+inline bool firstN(std::atomic<uint32_t>& c) { return c.fetch_add(1, std::memory_order_relaxed) < kFirstN; }
+}
 
 // Hard ceiling on backing playback speed. This drives input buffer sizing and runtime clamp.
 static constexpr double kMaxBackingSpeed = 4.0;
@@ -1189,13 +1202,28 @@ void AudioEngine::startAudio()
 
     // Input first so it has time to prefill the ring before the output
     // callback pulls — otherwise split mode underflows once at start.
-    inputDeviceManager.addAudioCallback(this);
+    //
+    // Same double-registration guard as the output side below: audioRunning is
+    // cleared by audioDeviceStopped() on a transient stop (WASAPI exclusive
+    // opens routinely fire one mid-start) while this callback stays attached,
+    // so an unguarded re-add here registered the INPUT callback twice — every
+    // block then ran the DSP twice and pushed into the split ring twice,
+    // playing each sample twice (half speed, one octave down, garbled), and
+    // stopAudio()'s single removeAudioCallback left a live registration behind
+    // that kept the device (exclusive!) open after "stop" and after app close.
+    if (!inputCallbackRegistered)
+    {
+        inputDeviceManager.addAudioCallback(this);
+        inputCallbackRegistered = true;
+    }
+    else
+    {
+        // DIAG: this is exactly the path that used to double-register the
+        // input callback (half-speed garble + device held open). Now skipped —
+        // log it so tester logs prove the guard fired.
+        fprintf(stderr, "[diag] startAudio: input callback already registered — skipping re-add (guard active)\n");
+    }
 
-    // Guard against double-registration: audioRunning can be cleared by
-    // audioDeviceStopped() on a transient input unplug while the output
-    // callback intentionally stays registered (JUCE auto-restart relies on
-    // that). A later startAudio() would then add the same callback again
-    // and JUCE would dispatch it twice per block.
     if (!duplexMode.load(std::memory_order_relaxed) && !outputCallbackRegistered)
     {
         outputDeviceManager.addAudioCallback(&outputCallback);
@@ -1222,6 +1250,10 @@ void AudioEngine::startAudio()
 
 void AudioEngine::stopAudio()
 {
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] stopAudio: audioRunning=%d inputCbReg=%d outputCbReg=%d\n",
+            (int) audioRunning.load(std::memory_order_relaxed),
+            (int) inputCallbackRegistered, (int) outputCallbackRegistered);
     // Always attempt to detach both callbacks — removeAudioCallback is
     // idempotent. We don't gate on audioRunning here because that flag can
     // be cleared externally by audioDeviceStopped() (input device
@@ -1232,6 +1264,7 @@ void AudioEngine::stopAudio()
     outputDeviceManager.removeAudioCallback(&outputCallback);
     outputCallbackRegistered = false;
     inputDeviceManager.removeAudioCallback(this);
+    inputCallbackRegistered = false;
     // Extra input devices are opened independently of startAudio(); close them here
     // too so a stopped engine never leaves a second interface capturing, feeding
     // detectors, and holding the hardware open in the background. KEEP their
@@ -1769,6 +1802,11 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     audioRunning.store(true, std::memory_order_relaxed);
     const double sr = device->getCurrentSampleRate();
     const int bs = device->getCurrentBufferSizeSamples();
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioDeviceAboutToStart: dev='%s' sr=%.0f bs=%d duplex=%d inputCbReg=%d outputCbReg=%d\n",
+            device->getName().toRawUTF8(), sr, bs,
+            (int) duplexMode.load(std::memory_order_relaxed),
+            (int) inputCallbackRegistered, (int) outputCallbackRegistered);
     currentSampleRate.store(sr, std::memory_order_relaxed);
     inputBlockSize.store(bs, std::memory_order_relaxed);
     if (duplexMode.load(std::memory_order_relaxed))
@@ -1841,6 +1879,8 @@ void AudioEngine::audioDeviceStopped()
     // sources: an EXTRA-device source is processed by that device's own callback,
     // which may still be running on its own thread — releasing it here would race.
     // Extra sources are released by extraInputStopped()/unbindInputDevice().
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioDeviceStopped (audioRunning cleared; callbacks stay attached for JUCE auto-restart)\n");
     audioRunning.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(sourcesMutex);
@@ -1873,6 +1913,9 @@ void AudioEngine::audioDeviceStopped()
 void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
 {
     const int bs = device->getCurrentBufferSizeSamples();
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioOutputAboutToStart: dev='%s' sr=%.0f bs=%d\n",
+            device->getName().toRawUTF8(), device->getCurrentSampleRate(), bs);
     outputBlockSize.store(bs, std::memory_order_relaxed);
 
     if ((int) outputPullScratchL.size() < bs) outputPullScratchL.assign((size_t) bs, 0.0f);
@@ -1937,6 +1980,8 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
 
 void AudioEngine::audioOutputStopped()
 {
+    if (slopsmith_vst_trace::isEnabled())
+        fprintf(stderr, "[diag] audioOutputStopped\n");
     // No-op by design. The consumer's catch-up branch in audioOutputCallback
     // handles both (w - r) > cap (producer lapped during the stop) and
     // w < r (a future reset race) on the next output start, so we don't
@@ -2212,7 +2257,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     // Publish that the callback body is executing so removeSource() and deferred-
     // release reclamation know when no source is being processed (the body is
     // quiescent) and a removed source can be safely released. Index 0 = primary.
-    callbacksInFlight[0].fetch_add(1, std::memory_order_acq_rel);
+    const int inFlightBefore = callbacksInFlight[0].fetch_add(1, std::memory_order_acq_rel);
+
+    // DIAG: two primary callback bodies at once = the input callback is
+    // registered twice on the device manager (the half-speed/garble bug) or a
+    // second device is dispatching into the primary path. Should never fire.
+    if (inFlightBefore > 0 && audiodiag::firstN(audiodiag::primaryReentry))
+        fprintf(stderr, "[diag] PRIMARY CALLBACK RE-ENTERED (inFlight=%d, numSamples=%d) — duplicate registration?\n",
+                inFlightBefore + 1, numSamples);
+
+    // DIAG: block larger than the size everything was prepared with.
+    {
+        const int preparedBs = inputBlockSize.load(std::memory_order_relaxed);
+        if (preparedBs > 0 && numSamples > preparedBs && audiodiag::firstN(audiodiag::oversizedBlocks))
+            fprintf(stderr, "[diag] primary callback OVERSIZED block: numSamples=%d > prepared=%d\n",
+                    numSamples, preparedBs);
+    }
 
     const bool duplex = duplexMode.load(std::memory_order_relaxed);
 
@@ -2816,6 +2876,10 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
 
     constexpr uint64_t kMask = (uint64_t) kOutputRingFrames - 1;
     constexpr uint64_t kCap  = (uint64_t) kOutputRingFrames;
+
+    if ((int) outputPullScratchL.size() < numSamples && audiodiag::firstN(audiodiag::outputOversized))
+        fprintf(stderr, "[diag] output callback OVERSIZED block: numSamples=%d > scratch=%d\n",
+                numSamples, (int) outputPullScratchL.size());
 
     // Clamp the working size to the scratch capacity pre-allocated in
     // audioOutputAboutToStart() so the .assign() calls below never realloc
