@@ -341,12 +341,27 @@ export function initAudioBridge(): void {
     if (audio && isDebugEnabled()) {
         let lastSnapshot = '';
         let lastLogged = 0;
+        // busFlowing must reflect the CURRENT poll interval: cumulative
+        // pushed/consumed counters never regress, so "> 0" would stay true
+        // forever after the first frame — masking a stalled bus, which is
+        // one of the states this diagnostic exists to expose.
+        let prevBusCounts: { pushed: number; consumed: number } | null = null;
         setInterval(() => {
             try {
                 if (!audio) return;
                 const running = !!audio.isAudioRunning?.();
                 const dev = running ? audio.getCurrentDevice?.() : null;
                 const bus = audio.getRendererBusMetrics?.() ?? null;
+                let busFlowing = false;
+                if (bus) {
+                    if (prevBusCounts) {
+                        busFlowing = bus.pushedFrames > prevBusCounts.pushed
+                            && bus.consumedFrames > prevBusCounts.consumed;
+                    }
+                    prevBusCounts = { pushed: bus.pushedFrames, consumed: bus.consumedFrames };
+                } else {
+                    prevBusCounts = null;
+                }
                 const snapshot = JSON.stringify({
                     running,
                     inputType: dev?.inputType ?? '',
@@ -357,9 +372,8 @@ export function initAudioBridge(): void {
                     backingPlaying: !!audio.isBackingPlaying?.(),
                     streamOutputActive: !!audio.isStreamOutputActive?.(),
                     busEnabled: bus?.enabled ?? null,
-                    // pushed/consumed prove frames are flowing; deltas matter,
-                    // absolute counts churn — bucket to "moving or not".
-                    busFlowing: !!bus && bus.pushedFrames > 0 && bus.consumedFrames > 0,
+                    // per-poll delta ("moved this interval"), not cumulative.
+                    busFlowing,
                     busUnderflows: bus?.underflowCount ?? null,
                     busOverflows: bus?.overflowCount ?? null,
                 });
