@@ -287,6 +287,11 @@ jobs:
             # first, then hand vpk --notaryProfile. Do NOT pass --keychain:
             # notarytool defaults to the login keychain, matching vpk's own
             # internal notarytool call.
+            # --signEntitlements is mandatory: vpk re-signs the bundle, and a
+            # codesign without an entitlements file STRIPS the ones
+            # electron-builder applied (audio-input, allow-jit, ...) — the
+            # hardened-runtime app then gets mic access auto-denied with no
+            # TCC prompt.
             xcrun notarytool store-credentials "velopack-notary" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
@@ -299,6 +304,7 @@ jobs:
               --mainExe "$mainexe" \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
+              --signEntitlements "$PWD/resources/entitlements.mac.plist" \
               --notaryProfile "velopack-notary"
           fi
 

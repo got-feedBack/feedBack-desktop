@@ -432,6 +432,11 @@ jobs:
             # leaving --keychain off keeps both sides pointing at the same
             # store. (build.keychain only holds the signing cert, which
             # codesign finds via the keychain search list.)
+            # --signEntitlements is mandatory: vpk re-signs the bundle, and a
+            # codesign without an entitlements file STRIPS the ones
+            # electron-builder applied (audio-input, allow-jit, ...) — the
+            # hardened-runtime app then gets mic access auto-denied with no
+            # TCC prompt.
             xcrun notarytool store-credentials "velopack-notary" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
@@ -444,6 +449,7 @@ jobs:
               --mainExe "$mainexe" \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
+              --signEntitlements "$PWD/resources/entitlements.mac.plist" \
               --notaryProfile "velopack-notary"
           fi
 
