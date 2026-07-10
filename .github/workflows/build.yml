@@ -449,7 +449,7 @@ jobs:
               --mainExe "$mainexe" \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
-              --signEntitlements resources/entitlements.mac.plist \
+              --signEntitlements "$PWD/resources/entitlements.mac.plist" \
               --notaryProfile "velopack-notary"
           fi
 
