@@ -13,6 +13,7 @@ import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { restartPython } from './python';
+import type { SavedWindowBounds } from './window-bounds';
 
 // ── Source of truth for the high-quality soundfont ──────────────────────────
 // Public mirror of FluidR3_GM.sf2 on the feedback-soundfonts repo. When a new
@@ -34,6 +35,9 @@ interface DesktopConfig {
     // 127.0.0.1, so other devices on the network can reach the library / sync
     // room. Opt-in (default loopback) — see python.ts and issue #441.
     lanAccess?: boolean;
+    // Last main-window geometry, restored (after sanitization against the
+    // current display layout) on next launch — see window-bounds.ts.
+    windowBounds?: SavedWindowBounds;
 }
 
 function configPath(): string {

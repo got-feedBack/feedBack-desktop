@@ -56,7 +56,7 @@ if (process.platform !== 'linux') {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
-import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, powerSaveBlocker, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, powerSaveBlocker, systemPreferences, screen } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
@@ -125,6 +125,7 @@ import { initSoundfontManager, getDesktopConfig, setDesktopConfig } from './soun
 import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
 import { installAppMenu } from './app-menu';
+import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
 
 // Linux: enable Chromium's PipeWire capturer feature so getUserMedia can see
 // audio devices on PipeWire-only distros (Fedora 36+, recent Ubuntu, Arch).
@@ -455,14 +456,38 @@ function isLocalServiceUrl(url: string, backendPort: number): boolean {
 }
 
 function createWindow(port: number): void {
+    // Restore the previous session's window geometry, validated against the
+    // current display layout so stale bounds (unplugged monitor, resolution
+    // change, hand-edited config) can't put the window off-screen. When x/y
+    // are absent Electron centers the window as before.
+    const restored = sanitizeWindowBounds(
+        getDesktopConfig().windowBounds,
+        screen.getAllDisplays().map((d) => d.workArea),
+    );
     mainWindow = new BrowserWindow({
-        width: 1400,
-        height: 900,
-        minWidth: 800,
-        minHeight: 600,
+        x: restored.x,
+        y: restored.y,
+        width: restored.width,
+        height: restored.height,
+        minWidth: MIN_WIDTH,
+        minHeight: MIN_HEIGHT,
         title: 'fee[dB]ack',
         backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
         webPreferences: rendererWebPreferences,
+    });
+    if (restored.maximized) mainWindow.maximize();
+
+    // Persist geometry on close. getNormalBounds() so a maximized session
+    // saves the underlying windowed size, restored + re-maximized next launch.
+    // ponytail: fullscreen is deliberately not persisted (launching straight
+    // into fullscreen is jarring, especially on macOS) and we save on close
+    // only — a crash loses the last session's geometry; add debounced
+    // resize/move saving if that ever matters.
+    mainWindow.on('close', () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        setDesktopConfig({
+            windowBounds: { ...mainWindow.getNormalBounds(), maximized: mainWindow.isMaximized() },
+        });
     });
 
     // Forward renderer console to main process stdout
