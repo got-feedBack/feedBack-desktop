@@ -501,8 +501,19 @@ function createWindow(port: number): void {
 
     const serverUrl = `http://127.0.0.1:${port}`;
 
+    // Clear the Chromium HTTP cache before the first load. The server
+    // historically sent no Cache-Control on /static, so heuristic freshness
+    // let a NEW build's window run the PREVIOUS build's app.js from disk
+    // cache (2026-07-11 ASIO investigation: the whole exclusive-reroute chain
+    // silently missing). The server now sends no-cache, but testers hop
+    // between portable builds sharing one userData dir — one cheap clear per
+    // launch makes stale-bundle states impossible regardless of what an
+    // older build's server cached.
+    const clearCachePromise = mainWindow.webContents.session.clearCache()
+        .catch((e) => console.warn(`[main] clearCache failed (continuing): ${e.message}`));
+
     // Small delay to ensure server is fully accepting connections, then load
-    setTimeout(() => mainWindow?.loadURL(serverUrl), 500);
+    setTimeout(() => { void clearCachePromise.then(() => mainWindow?.loadURL(serverUrl)); }, 500);
 
     // Retry loading if the server wasn't reachable yet. Previously this
     // retried just once, which left the window stuck on Chromium's
