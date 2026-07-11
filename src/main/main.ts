@@ -56,7 +56,7 @@ if (process.platform !== 'linux') {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
-import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, powerSaveBlocker, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, powerSaveBlocker, systemPreferences, desktopCapturer } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
@@ -469,6 +469,34 @@ function createWindow(port: number): void {
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
         const prefix = ['[renderer:verbose]', '[renderer:info]', '[renderer:warn]', '[renderer:error]'][level] || '[renderer]';
         console.log(`${prefix} ${message}`);
+    });
+
+    // Whole-app audio capture for exclusive-style outputs (ASIO / WASAPI
+    // exclusive). The renderer-bus feeder in the static bundle calls
+    // getDisplayMedia({audio, video}) to capture EVERY sound the app makes
+    // (song, previews, UI) and push it into the engine's renderer bus —
+    // per-surface taps can't cover plugin-private AudioContexts. Answer the
+    // request with this window's own frame as the audio source (frame-scoped:
+    // other applications' audio is NOT captured — a system 'loopback' would
+    // leak Discord/etc. into the performance mix) and any screen as the
+    // required-but-unused video track (the feeder stops it immediately).
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+        desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+            if (!mainWindow || sources.length === 0) { callback({}); return; }
+            callback({ video: sources[0], audio: mainWindow.webContents.mainFrame });
+        }).catch(() => callback({}));
+    });
+
+    // Local-mute companion for the capture above: when the feeder engages
+    // loopback it must stop the page's audio from ALSO reaching the default
+    // WASAPI device. Preferred path is the suppressLocalAudioPlayback track
+    // constraint; this IPC is the fallback when the constraint is
+    // unsupported. Chromium's capture pipeline taps frame audio before the
+    // output mute, so a muted page still feeds the captured stream.
+    ipcMain.handle('audio:setPageMuted', (_event, muted: unknown) => {
+        if (!mainWindow) return false;
+        mainWindow.webContents.setAudioMuted(muted === true);
+        return mainWindow.webContents.isAudioMuted();
     });
 
     const serverUrl = `http://127.0.0.1:${port}`;

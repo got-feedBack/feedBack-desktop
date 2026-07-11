@@ -1838,6 +1838,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     constexpr int streamScratchCap = (int) kOutputRingFrames;
     if (streamGuitarScratch.getNumSamples() < streamScratchCap) streamGuitarScratch.setSize(2, streamScratchCap, false, false, true);
     if (streamMixScratch.getNumSamples() < streamScratchCap)    streamMixScratch.setSize(2, streamScratchCap, false, false, true);
+    if (rendererBusPullScratch.getNumSamples() < streamScratchCap) rendererBusPullScratch.setSize(2, streamScratchCap, false, false, true);
 
     // Prepare each ACTIVE PRIMARY-device source's DSP and reset its rings for a
     // clean cold start. Inactive pooled chains stay unprepared (no threads). EXTRA-
@@ -1929,6 +1930,7 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
     constexpr int streamScratchCap = (int) kOutputRingFrames;
     if (streamGuitarScratch.getNumSamples() < streamScratchCap) streamGuitarScratch.setSize(2, streamScratchCap, false, false, true);
     if (streamMixScratch.getNumSamples() < streamScratchCap)    streamMixScratch.setSize(2, streamScratchCap, false, false, true);
+    if (rendererBusPullScratch.getNumSamples() < streamScratchCap) rendererBusPullScratch.setSize(2, streamScratchCap, false, false, true);
     // NOTE: outputBackingBuffer is sized by audioDeviceAboutToStart() from the
     // INPUT device's block size — it's the split-input DSP scratch, not an
     // output-side buffer. Don't touch it here: resizing from the output
@@ -1998,7 +2000,9 @@ void AudioEngine::audioOutputStopped()
 
 void AudioEngine::composeAndPushStreamMix(const juce::AudioBuffer<float>& guitarMix,
                                           const juce::AudioBuffer<float>* backingBuf,
-                                          int backingFrames, float backingVol, int numSamples)
+                                          int backingFrames, float backingVol,
+                                          const juce::AudioBuffer<float>* rendererBuf,
+                                          int rendererFrames, int numSamples)
 {
     if (! streamSink.active.load(std::memory_order_acquire)) return;
     // A block larger than the entire ring can't be published atomically (it would
@@ -2035,6 +2039,20 @@ void AudioEngine::composeAndPushStreamMix(const juce::AudioBuffer<float>& guitar
         for (int ch = 0; ch < 2; ++ch)
             streamMixScratch.addFrom(ch, 0, *backingBuf,
                 juce::jmin(ch, backingBuf->getNumChannels() - 1), 0, n, backingVol);
+    }
+    // Renderer-fed song audio (stems / element / loopback riding the renderer
+    // bus) is song audio for the streamer too — without this the stream mix
+    // carries guitar only whenever the song bypasses the native transport
+    // (multi-stem under exclusive/ASIO output). Bus gain is already applied by
+    // pullRendererBus; only the stream gain below shapes it further. Backing
+    // transport and renderer bus are mutually exclusive song paths in
+    // practice, so this never double-carries.
+    if (ib && rendererBuf != nullptr && rendererFrames > 0)
+    {
+        const int n = juce::jmin(rendererFrames, numSamples);
+        for (int ch = 0; ch < 2; ++ch)
+            streamMixScratch.addFrom(ch, 0, *rendererBuf,
+                juce::jmin(ch, rendererBuf->getNumChannels() - 1), 0, n);
     }
     streamMixScratch.applyGain(0, 0, numSamples, gain);
     streamMixScratch.applyGain(1, 0, numSamples, gain);
@@ -2365,17 +2383,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
             currentBackingLevel.store(0.0f);
         }
 
-        // Stream sink: compose + push the stream submix (guitar snapshot + backing)
-        // BEFORE the local master output gain, so the stream level is independent.
+        // Renderer bus (duplex clock): pulled ONCE per block into the scratch,
+        // then shared by the stream submix and the device output — the ring is
+        // a single-consumer SPSC, so the stream path must not drain it again.
+        const int rendererFrames = pullRendererBus(rendererBusPullScratch, numSamples);
+
+        // Stream sink: compose + push the stream submix (guitar snapshot +
+        // backing + renderer-bus song audio) BEFORE the local master output
+        // gain, so the stream level is independent.
         if (streamActive)
             composeAndPushStreamMix(streamGuitarScratch,
                                     streamBackingOn ? &backingBuffer : nullptr,
-                                    streamBackingFrames, streamBackingVol, numSamples);
+                                    streamBackingFrames, streamBackingVol,
+                                    rendererFrames > 0 ? &rendererBusPullScratch : nullptr,
+                                    rendererFrames, numSamples);
 
-        // Renderer bus (duplex clock): mixed like backing — after the stream
-        // snapshot (the stream submix must not double-carry song audio the
-        // renderer also feeds), before the master gain.
-        mixRendererBusInto(buffer, numSamples, juce::jmin(numOutputChannels, 2));
+        // Renderer bus into the device output — like backing, before master gain.
+        if (rendererFrames > 0)
+            for (int ch = 0; ch < juce::jmin(numOutputChannels, 2); ++ch)
+                buffer.addFrom(ch, 0, rendererBusPullScratch, ch, 0, rendererFrames);
 
         // Apply output gain
         buffer.applyGain(outputGain.load());
@@ -3031,6 +3057,11 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
             currentBackingLevel.store(0.0f);
         }
 
+        // Renderer bus (split clock): pulled ONCE per block into the scratch,
+        // shared by the stream submix and the device output (single-consumer
+        // ring — the stream path must not drain it again).
+        const int rendererFrames = pullRendererBus(rendererBusPullScratch, numSamples);
+
         // Stream sink: compose + push the stream submix before the local master
         // gain. Done INSIDE the backingLock scope so backingBuffer is read under the
         // very lock that guards its resize (audio*AboutToStart) — matching the duplex
@@ -3039,11 +3070,15 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
         if (streamActive)
             composeAndPushStreamMix(streamGuitarScratch,
                                     streamBackingOn ? &backingBuffer : nullptr,
-                                    streamBackingFrames, streamBackingVol, numSamples);
-    }
+                                    streamBackingFrames, streamBackingVol,
+                                    rendererFrames > 0 ? &rendererBusPullScratch : nullptr,
+                                    rendererFrames, numSamples);
 
-    // Renderer bus (split clock): mixed like backing — before the master gain.
-    mixRendererBusInto(buffer, numSamples, copyChannels);
+        // Renderer bus into the device output — like backing, before master gain.
+        if (rendererFrames > 0)
+            for (int ch = 0; ch < juce::jmin(copyChannels, 2); ++ch)
+                buffer.addFrom(ch, 0, rendererBusPullScratch, ch, 0, rendererFrames);
+    }
 
     buffer.applyGain(outputGain.load());
 
@@ -3105,9 +3140,12 @@ bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, doub
     return true;
 }
 
-void AudioEngine::mixRendererBusInto(juce::AudioBuffer<float>& buffer, int numSamples, int mixChannels)
+int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
 {
-    if (!rendererBusEnabled.load(std::memory_order_acquire)) return;
+    if (!rendererBusEnabled.load(std::memory_order_acquire)) return 0;
+    // Cold start before about-to-start sized the scratch — skip, never alloc
+    // on the RT thread (same rule as the stream scratches).
+    if (dest.getNumSamples() < numSamples || dest.getNumChannels() < 2) return 0;
     constexpr uint64_t kMask = kRendererBusFrames - 1;
     const uint64_t w = rendererBusWriteIndex.load(std::memory_order_acquire);
     uint64_t r = rendererBusReadIndex.load(std::memory_order_relaxed);
@@ -3139,7 +3177,7 @@ void AudioEngine::mixRendererBusInto(juce::AudioBuffer<float>& buffer, int numSa
         if (avail < (uint64_t) kRendererBusPrimeFrames)
         {
             rendererBusReadIndex.store(r, std::memory_order_release);
-            return;
+            return 0;
         }
         rendererBusPrimed = true;
     }
@@ -3150,21 +3188,23 @@ void AudioEngine::mixRendererBusInto(juce::AudioBuffer<float>& buffer, int numSa
         rendererBusPrimed = false;
         rendererBusUnderflowCount.fetch_add(1, std::memory_order_relaxed);
         rendererBusReadIndex.store(w, std::memory_order_release);
-        return;
+        return 0;
     }
 
     const int pull = numSamples;
-    const int chans = juce::jmin(mixChannels, buffer.getNumChannels());
     const float g = rendererBusGain.load(std::memory_order_relaxed);
+    float* dl = dest.getWritePointer(0);
+    float* dr = dest.getWritePointer(1);
     for (int i = 0; i < pull; ++i)
     {
         float l, rr;
         unpackLR(rendererBusRing[(size_t) ((r + (uint64_t) i) & kMask)].load(std::memory_order_relaxed), l, rr);
-        buffer.addSample(0, i, l * g);
-        if (chans > 1) buffer.addSample(1, i, rr * g);
+        dl[i] = l * g;
+        dr[i] = rr * g;
     }
     rendererBusReadIndex.store(r + (uint64_t) pull, std::memory_order_release);
     rendererBusConsumedFrames.fetch_add((uint64_t) pull, std::memory_order_relaxed);
+    return pull;
 }
 
 AudioEngine::RendererBusMetrics AudioEngine::getRendererBusMetrics() const

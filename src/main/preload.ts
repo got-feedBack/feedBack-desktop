@@ -216,6 +216,13 @@ const feedBackDesktopApi = {
         // The static bundle gates its verbose [asio-diag] routing lines on
         // this so normal runs don't spam the console.
         debugEnabled: (): Promise<boolean> => ipcRenderer.invoke('debug:isEnabled'),
+        // Mute/unmute the whole page's local audio output. Fallback for the
+        // loopback feeder when the suppressLocalAudioPlayback capture
+        // constraint is unsupported — a muted page still feeds the captured
+        // stream (capture taps frame audio before the output mute). Resolves
+        // with the resulting muted state.
+        setPageMuted: (muted: boolean): Promise<boolean> =>
+            ipcRenderer.invoke('audio:setPageMuted', muted),
         setDeviceType: (typeName: string) => ipcRenderer.invoke('audio:setDeviceType', typeName),
         setOutputDeviceType: (typeName: string) => ipcRenderer.invoke('audio:setOutputDeviceType', typeName),
         setDevice: ((
