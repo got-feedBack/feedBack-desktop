@@ -485,9 +485,13 @@ function createWindow(port: number): void {
     // resize/move saving if that ever matters.
     mainWindow.on('close', () => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
-        setDesktopConfig({
-            windowBounds: { ...mainWindow.getNormalBounds(), maximized: mainWindow.isMaximized() },
-        });
+        try {
+            setDesktopConfig({
+                windowBounds: { ...mainWindow.getNormalBounds(), maximized: mainWindow.isMaximized() },
+            });
+        } catch (err) {
+            console.warn('[main] Failed to persist window bounds on close:', err);
+        }
     });
 
     // Forward renderer console to main process stdout
