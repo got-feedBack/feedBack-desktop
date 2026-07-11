@@ -381,7 +381,28 @@ export function initAudioBridge(): void {
                 if (snapshot !== lastSnapshot || now - lastLogged > 30000) {
                     lastSnapshot = snapshot;
                     lastLogged = now;
-                    console.log(`[asio-diag] engine: ${snapshot}`);
+                    // Volatile health fields ride along on every logged line
+                    // but stay OUT of the change-detection snapshot (levels
+                    // churn every block — keying on them would log every 2s).
+                    // outputLevel≈0 while running is the "engine produces
+                    // silence" symptom (audio dead after song stop); ring
+                    // fill/underflows separate a stalled callback from a
+                    // silent mix.
+                    let volatilePart = '';
+                    try {
+                        const lv = audio.getLevels?.() ?? null;
+                        const dm = audio.getDeviceMetrics?.() ?? null;
+                        volatilePart = ' levels=' + JSON.stringify({
+                            in: +(lv?.inputLevel ?? -1).toFixed(4),
+                            out: +(lv?.outputLevel ?? -1).toFixed(4),
+                            backing: +(audio.getBackingLevel?.() ?? -1).toFixed(4),
+                            busFill: bus?.fillFrames ?? null,
+                            inOverflows: dm?.inputOverflowCount ?? null,
+                            outUnderflows: dm?.outputUnderflowCount ?? null,
+                            outRingFill: dm?.outputRingFillFrames ?? null,
+                        });
+                    } catch (_) { /* metrics best-effort */ }
+                    console.log(`[asio-diag] engine: ${snapshot}${volatilePart}`);
                 }
             } catch (e: any) {
                 console.warn(`[asio-diag] snapshot failed: ${e.message}`);

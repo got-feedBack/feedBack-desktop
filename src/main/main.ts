@@ -56,7 +56,7 @@ if (process.platform !== 'linux') {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
-import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, powerSaveBlocker, systemPreferences, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter, powerSaveBlocker, systemPreferences, desktopCapturer, screen } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
@@ -500,10 +500,49 @@ function createWindow(port: number): void {
         console.log(`${prefix} ${message}`);
     });
 
+    // Whole-app audio capture for exclusive-style outputs (ASIO / WASAPI
+    // exclusive). The renderer-bus feeder in the static bundle calls
+    // getDisplayMedia({audio, video}) to capture EVERY sound the app makes
+    // (song, previews, UI) and push it into the engine's renderer bus —
+    // per-surface taps can't cover plugin-private AudioContexts. Answer the
+    // request with this window's own frame as the audio source (frame-scoped:
+    // other applications' audio is NOT captured — a system 'loopback' would
+    // leak Discord/etc. into the performance mix) and any screen as the
+    // required-but-unused video track (the feeder stops it immediately).
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+        desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+            if (!mainWindow || sources.length === 0) { callback({}); return; }
+            callback({ video: sources[0], audio: mainWindow.webContents.mainFrame });
+        }).catch(() => callback({}));
+    });
+
+    // Local-mute companion for the capture above: when the feeder engages
+    // loopback it must stop the page's audio from ALSO reaching the default
+    // WASAPI device. Preferred path is the suppressLocalAudioPlayback track
+    // constraint; this IPC is the fallback when the constraint is
+    // unsupported. Chromium's capture pipeline taps frame audio before the
+    // output mute, so a muted page still feeds the captured stream.
+    ipcMain.handle('audio:setPageMuted', (_event, muted: unknown) => {
+        if (!mainWindow) return false;
+        mainWindow.webContents.setAudioMuted(muted === true);
+        return mainWindow.webContents.isAudioMuted();
+    });
+
     const serverUrl = `http://127.0.0.1:${port}`;
 
+    // Clear the Chromium HTTP cache before the first load. The server
+    // historically sent no Cache-Control on /static, so heuristic freshness
+    // let a NEW build's window run the PREVIOUS build's app.js from disk
+    // cache (2026-07-11 ASIO investigation: the whole exclusive-reroute chain
+    // silently missing). The server now sends no-cache, but testers hop
+    // between portable builds sharing one userData dir — one cheap clear per
+    // launch makes stale-bundle states impossible regardless of what an
+    // older build's server cached.
+    const clearCachePromise = mainWindow.webContents.session.clearCache()
+        .catch((e) => console.warn(`[main] clearCache failed (continuing): ${e.message}`));
+
     // Small delay to ensure server is fully accepting connections, then load
-    setTimeout(() => mainWindow?.loadURL(serverUrl), 500);
+    setTimeout(() => { void clearCachePromise.then(() => mainWindow?.loadURL(serverUrl)); }, 500);
 
     // Retry loading if the server wasn't reachable yet. Previously this
     // retried just once, which left the window stuck on Chromium's

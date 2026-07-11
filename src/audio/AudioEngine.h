@@ -621,8 +621,17 @@ private:
     // interpolation continuity across pushes).
     double rendererBusSrcPos = 0.0;
     float  rendererBusPrevL = 0.0f, rendererBusPrevR = 0.0f;
-    // Shared consumer step for the duplex and split output paths.
-    void mixRendererBusInto(juce::AudioBuffer<float>& buffer, int numSamples, int mixChannels);
+    // Shared consumer step for the duplex and split output paths: drain one
+    // block from the renderer-bus ring into `dest` (stereo, bus gain applied,
+    // dest cleared first). Returns numSamples on success, 0 when gated
+    // (disabled, priming, underflow, scratch undersized). Single consumer —
+    // call exactly once per output block; the caller mixes the pulled block
+    // into the device output AND hands it to composeAndPushStreamMix so the
+    // streamer submix carries renderer-fed song audio too.
+    int pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples);
+    // Scratch for the per-block renderer-bus pull. Fixed capacity, sized once
+    // in about-to-start next to the stream scratches (same no-realloc rule).
+    juce::AudioBuffer<float> rendererBusPullScratch;
 
     std::atomic<uint64_t> outputRingWriteIndex{0};
     std::atomic<uint64_t> outputRingReadIndex{0};
@@ -794,11 +803,17 @@ private:
     // inputs). Also the single teardown used by the dtor and clearStreamOutput().
     void closeStreamSinkDevice();
     // Compose the stream submix from the captured guitar mix + the just-rendered
-    // backing block and pack it into the stream ring. Called from both output
-    // callbacks after backing render. `backingBuf` may be null (not playing).
+    // backing block + the just-pulled renderer-bus block and pack it into the
+    // stream ring. Called from both output callbacks after backing render.
+    // `backingBuf` / `rendererBuf` may be null (not playing / bus gated).
+    // The renderer bus rides the includeBacking flag: it IS song audio, just
+    // fed from the renderer instead of the native transport (bus gain already
+    // applied by pullRendererBus).
     void composeAndPushStreamMix(const juce::AudioBuffer<float>& guitarMix,
                                  const juce::AudioBuffer<float>* backingBuf,
-                                 int backingFrames, float backingVol, int numSamples);
+                                 int backingFrames, float backingVol,
+                                 const juce::AudioBuffer<float>* rendererBuf,
+                                 int rendererFrames, int numSamples);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
