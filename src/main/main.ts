@@ -509,11 +509,23 @@ function createWindow(port: number): void {
     // other applications' audio is NOT captured — a system 'loopback' would
     // leak Discord/etc. into the performance mix) and any screen as the
     // required-but-unused video track (the feeder stops it immediately).
+    // [asio-diag] every outcome below is logged: a renderer-side
+    // NotAllowedError with NO handler line in the main log means the running
+    // main predates this handler (stale-main/new-bundle mix).
     session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+        console.log('[asio-diag] display-media request received (loopback capture)');
         desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-            if (!mainWindow || sources.length === 0) { callback({}); return; }
+            if (!mainWindow || sources.length === 0) {
+                console.warn(`[asio-diag] display-media DENIED: mainWindow=${!!mainWindow} screenSources=${sources.length}`);
+                callback({});
+                return;
+            }
+            console.log('[asio-diag] display-media granted: frame audio + screen video');
             callback({ video: sources[0], audio: mainWindow.webContents.mainFrame });
-        }).catch(() => callback({}));
+        }).catch((e) => {
+            console.warn(`[asio-diag] display-media DENIED: getSources failed: ${e?.message ?? e}`);
+            callback({});
+        });
     });
 
     // Local-mute companion for the capture above: when the feeder engages
@@ -880,42 +892,65 @@ function installRendererPermissions(rendererPort: number): void {
     const isRendererOrigin = makeRendererOriginPredicate(rendererPort);
     const def = session.defaultSession;
     def.setPermissionRequestHandler((_wc, permission, callback, details) => {
-        if (DENY_PERMISSIONS.has(permission)) {
+        // [asio-diag] getDisplayMedia (loopback capture) rides this path
+        // ('display-capture' and/or 'media' with video) BEFORE the
+        // display-media handler — log every deny so an upstream permission
+        // denial is distinguishable from a handler-level one.
+        const deny = (why: string) => {
+            console.warn(`[asio-diag] permission-request DENIED: ${permission} (${why}) url=${details.requestingUrl ?? ''}`);
             callback(false);
+        };
+        if (DENY_PERMISSIONS.has(permission)) {
+            deny('deny-list');
             return;
         }
         if (!isRendererOrigin(details.requestingUrl || '')) {
-            callback(false);
+            deny('non-renderer origin');
             return;
         }
         if (permission === 'media') {
-            // Electron passes mediaTypes (`'audio'` / `'video'`) for the
-            // request-handler path. Allow only when the request is
-            // explicitly audio-only — Slopsmith doesn't use the camera,
-            // so we want both "video requested" AND "mediaTypes
-            // missing/empty" to deny (the latter would otherwise let an
-            // older / synthetic request slip through).
+            // Electron passes mediaTypes (`'audio'` / `'video'`) for
+            // getUserMedia requests. Allow explicit audio-only (microphone
+            // for pitch detection) and deny camera. getDisplayMedia — the
+            // renderer-bus whole-app loopback capture — ALSO rides this
+            // permission but with EMPTY mediaTypes, so empty must be
+            // allowed or the display-media handler below never runs and
+            // exclusive/ASIO output loses all page audio (song previews,
+            // fallback element songs). Verified 2026-07-12: the old
+            // "empty ⇒ deny" rule was exactly the tester's silent-preview
+            // bug. Camera exposure stays impossible: getDisplayMedia video
+            // is the app's own frame, and real camera requests always
+            // carry mediaTypes=['video'].
             const mediaTypes = (details as { mediaTypes?: string[] }).mediaTypes;
             const types = new Set(mediaTypes ?? []);
-            const audioOnly = types.has('audio') && !types.has('video');
-            callback(audioOnly);
+            if (types.has('video')) { deny(`media types=[${[...types].join(',')}]`); return; }
+            callback(true);
             return;
         }
         callback(true);
     });
     def.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
-        if (DENY_PERMISSIONS.has(permission)) return false;
-        if (!isRendererOrigin(requestingOrigin || '')) return false;
+        if (DENY_PERMISSIONS.has(permission)) {
+            console.warn(`[asio-diag] permission-check DENIED: ${permission} (deny-list) origin=${requestingOrigin ?? ''}`);
+            return false;
+        }
+        if (!isRendererOrigin(requestingOrigin || '')) {
+            console.warn(`[asio-diag] permission-check DENIED: ${permission} (non-renderer origin) origin=${requestingOrigin ?? ''}`);
+            return false;
+        }
         if (permission === 'media') {
-            // Mirror the request-handler's audio-only policy in the
-            // synchronous check path so navigator.permissions.query()
-            // reports the same state we'll actually grant. Electron's
-            // check-handler `details` exposes `mediaType` (singular),
-            // unlike the request-handler's `mediaTypes` (plural array).
-            // Treat `'video'` and `'unknown'` as denied, only explicit
-            // `'audio'` as granted.
+            // Mirror the request-handler in the synchronous check path so
+            // navigator.permissions.query() reports the same state we'll
+            // actually grant: deny camera ('video'), allow audio and the
+            // type-less display-capture path. Electron's check-handler
+            // `details` exposes `mediaType` (singular), unlike the
+            // request-handler's `mediaTypes` (plural array).
             const mediaType = (details as { mediaType?: string }).mediaType;
-            return mediaType === 'audio';
+            if (mediaType === 'video') {
+                console.warn(`[asio-diag] permission-check DENIED: media (mediaType=video) origin=${requestingOrigin ?? ''}`);
+                return false;
+            }
+            return true;
         }
         return true;
     });
