@@ -200,6 +200,9 @@ jobs:
       # Windows: pack the electron-builder unpacked dir into Velopack release
       # assets (per-machine MSI, *-full.nupkg, *-delta.nupkg,
       # releases.win-x64-nightly.json). Unsigned (same as build.yml's win pack).
+      # --noPortable: vpk's Portable.zip (Update.exe stub wrapping the app) is
+      # suppressed — the plain feedback-windows-x64.zip above is the one
+      # portable tester download.
       # See build.yml's "Velopack pack (Windows)" for the --msi / Setup.exe
       # policy rationale — this is a channel-swapped copy of it.
       - name: Velopack pack (Windows)
@@ -220,6 +223,7 @@ jobs:
             --channel "win-x64-nightly" \
             --packDir release/win-unpacked \
             --mainExe "$mainexe" \
+            --noPortable \
             --msi \
             --instLocation PerMachine \
             -o release/velopack
@@ -364,6 +368,7 @@ jobs:
             artifacts/**/velopack/**/*
             artifacts/**/*.AppImage
             artifacts/**/*.deb
+            artifacts/**/*.zip
           )
           # Filter to real files (globs that matched nothing expand to nothing
           # under nullglob, but guard against directories sneaking in).
