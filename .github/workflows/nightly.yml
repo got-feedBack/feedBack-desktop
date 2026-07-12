@@ -257,6 +257,8 @@ jobs:
       # applyable on user machines, so nightly notarizes here. Falls back to an
       # unsigned pack if any Apple secret is missing (forks / partial configs).
       # Runs before the keychain cleanup below (needs the signing cert).
+      # --noPortable: same as the Windows pack — the tester zip above is the
+      # one portable download; updates ride on the .nupkg feed.
       - name: Velopack pack (macOS)
         if: matrix.platform == 'mac'
         shell: bash
@@ -285,6 +287,7 @@ jobs:
               --channel "osx-arm64-nightly" \
               --packDir "$app" \
               --mainExe "$mainexe" \
+              --noPortable \
               -o release/velopack
           else
             # vpk notarizes through a notarytool *credential profile*. Create it
@@ -306,6 +309,7 @@ jobs:
               --channel "osx-arm64-nightly" \
               --packDir "$app" \
               --mainExe "$mainexe" \
+              --noPortable \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
               --signEntitlements "$PWD/resources/entitlements.mac.entitlements" \
