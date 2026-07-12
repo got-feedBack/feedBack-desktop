@@ -1,59 +1,48 @@
 // Pane pop-out windows.
 //
-// feedBack core has a pane system (window.feedBack.panes): live UI — a mixer, a
-// camera rig, a readout — authored once and hostable anywhere. In a plain
-// browser it pops out via window.open(). Here it gets a real BrowserWindow, with
-// remembered geometry, always-on-top, and a system tray (pane-tray.ts).
+// feedBack core has a pane system (window.feedBack.panes): a plugin's panel — a
+// mixer, a camera rig, a readout — popped out of the app into its own window and
+// left there. Here it gets the desktop treatment: remembered geometry, off the
+// taskbar, minimize-to-tray, and a tray menu that lists every pane (pane-tray.ts).
 //
-// Division of labour: THE RENDERER OWNS THE TRUTH. It knows which panes exist,
-// which are open, and what is in them. This module owns OS surfaces only —
-// windows and their geometry. It never looks inside a pane.
+// READ THIS BEFORE "TIDYING UP" THE WINDOW CREATION.
 //
-// The window loads `<renderer origin>/pane?...`, which matters for one specific
-// reason: a pane is fed over BroadcastChannel, and BroadcastChannel only reaches
-// windows in the same Chromium instance and origin. Push the URL to the system
-// browser and the pane opens looking perfect and never updates again. That is
-// also why main.ts's setWindowOpenHandler answers same-origin URLs with
-// `action: 'allow'` rather than `deny` + shell.openExternal.
+// We do NOT create these windows. The renderer opens them with window.open(), and
+// Electron's setWindowOpenHandler (main.ts) turns that into a real BrowserWindow
+// for us. That is not an accident and it is not laziness:
+//
+//   The pane's element is MOVED into the pop-out window — the actual DOM node,
+//   adopted across same-origin documents, so it keeps its listeners and its
+//   closures and goes on running the plugin's own code. To adopt it, the renderer
+//   needs a handle on the new window's document. A window WE created in the main
+//   process gives it no such handle. Create the window here and the whole feature
+//   collapses back into "reimplement the panel and sync it over IPC".
+//
+// So the renderer opens the window, names its frame `fbpane-<paneId>`, and we
+// recognise it in main.ts's did-create-window and attach the OS behaviour. The
+// renderer keeps the DOM link; we supply the window manners.
 
 import { BrowserWindow, ipcMain, screen } from 'electron';
-import {
-    IPC_PANE_OPEN,
-    IPC_PANE_CLOSE,
-    IPC_PANE_FOCUS,
-    IPC_PANE_SET_ALWAYS_ON_TOP,
-    IPC_PANE_SYNC,
-    IPC_PANE_EVENT_CLOSED,
-} from './ipc-channels';
+import { IPC_PANE_SYNC } from './ipc-channels';
 import { sanitizeWindowBounds, type WindowSizing } from './window-bounds';
 import { getDesktopConfig, setDesktopConfig, type SavedPaneWindow } from './soundfont-manager';
 import { setTrayPanes, type TrayPane } from './pane-tray';
 
-// A pane window is small by nature. The main window's 800x600 floor would
-// inflate one threefold, which is why sanitizeWindowBounds takes sizing now.
+// The renderer names the frame `fbpane-<paneId>`. Keep in sync with
+// static/panes/pane-window-host.js.
+const FRAME_PREFIX = 'fbpane-';
+
+// A pane window is small by nature. The main window's 800x600 floor would inflate
+// one threefold, which is why sanitizeWindowBounds takes sizing now.
 const PANE_SIZING: WindowSizing = {
-    minWidth: 260,
-    minHeight: 200,
+    minWidth: 240,
+    minHeight: 180,
     defaultWidth: 380,
     defaultHeight: 560,
 };
 
-interface PaneOpenRequest {
-    paneId: string;
-    url: string;
-    title: string;
-    width?: number;
-    height?: number;
-}
-
 const windows = new Map<string, BrowserWindow>();
 let getMainWindow: () => BrowserWindow | null = () => null;
-let isRendererOrigin: (url: string) => boolean = () => false;
-
-function notifyRenderer(channel: string, payload: unknown): void {
-    const win = getMainWindow();
-    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
-}
 
 // ── Geometry ────────────────────────────────────────────────────────────────
 
@@ -73,111 +62,83 @@ function persist(paneId: string, patch: SavedPaneWindow): void {
     }
 }
 
-// ── Windows ─────────────────────────────────────────────────────────────────
+// ── Adoption ────────────────────────────────────────────────────────────────
 
-function openPane(req: PaneOpenRequest, webPreferences: Electron.WebPreferences): boolean {
-    // IPC is untyped at runtime. Validate before handing anything to
-    // BrowserWindow — and above all, refuse a URL that is not the renderer's own
-    // origin, or we would be opening arbitrary web content with the full preload
-    // bridge attached.
-    if (typeof req?.paneId !== 'string' || !req.paneId) return false;
-    if (typeof req?.url !== 'string' || !isRendererOrigin(req.url)) {
-        console.warn(`[panes] refusing to open a pane at a non-renderer origin: ${String(req?.url)}`);
-        return false;
-    }
+export function paneIdFromFrameName(frameName: string): string | null {
+    if (!frameName || !frameName.startsWith(FRAME_PREFIX)) return null;
+    const id = frameName.slice(FRAME_PREFIX.length);
+    return id ? id : null;
+}
 
-    const existing = windows.get(req.paneId);
-    if (existing && !existing.isDestroyed()) {
-        // Already open: show it rather than opening a second copy. A pane that is
-        // hidden in the tray comes back here.
-        if (!existing.isVisible()) existing.show();
-        existing.focus();
-        return true;
-    }
+// Called from main.ts's did-create-window when the renderer pops a pane out.
+export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
+    windows.set(paneId, win);
 
-    const saved = savedFor(req.paneId);
+    const saved = savedFor(paneId);
     const restored = sanitizeWindowBounds(
         saved.bounds,
         screen.getAllDisplays().map((d) => d.workArea),
-        {
-            ...PANE_SIZING,
-            // The pane's own declared size is the fallback when it has never been
-            // opened before; the saved bounds win once it has.
-            defaultWidth: req.width ?? PANE_SIZING.defaultWidth,
-            defaultHeight: req.height ?? PANE_SIZING.defaultHeight,
-        },
+        // The size window.open() asked for is the fallback for a pane that has
+        // never been opened before; the saved bounds win once it has.
+        { ...PANE_SIZING, defaultWidth: win.getBounds().width, defaultHeight: win.getBounds().height },
     );
+    if (restored.x !== undefined && restored.y !== undefined) {
+        win.setBounds({ x: restored.x, y: restored.y, width: restored.width, height: restored.height });
+    } else {
+        win.setSize(restored.width, restored.height);
+    }
+    win.setMinimumSize(PANE_SIZING.minWidth, PANE_SIZING.minHeight);
+    if (saved.alwaysOnTop === true) win.setAlwaysOnTop(true);
 
-    const win = new BrowserWindow({
-        x: restored.x,
-        y: restored.y,
-        width: restored.width,
-        height: restored.height,
-        minWidth: PANE_SIZING.minWidth,
-        minHeight: PANE_SIZING.minHeight,
-        title: req.title || 'fee[dB]ack',
-        backgroundColor: '#0f172a',
-        alwaysOnTop: saved.alwaysOnTop === true,
-        // A pane is a companion to the app, not an entry to it: keep it off the
-        // taskbar so it never masquerades as a second fee[dB]ack.
-        skipTaskbar: true,
-        webPreferences,
-    });
+    // A pane is a companion to the app, not an entry to it: keep it off the taskbar
+    // so it never masquerades as a second fee[dB]ack.
+    win.setSkipTaskbar(true);
 
-    windows.set(req.paneId, win);
-
-    // Persist on move/resize, not just on close — a pane window can outlive the
-    // app in a crash, and the whole point of remembering geometry is that the
-    // user never has to place it twice.
+    // Persist on move/resize, not only on close — a pane window can outlive the app
+    // in a crash, and the whole point of remembering geometry is that you never
+    // place it twice.
     const save = (): void => {
         if (win.isDestroyed()) return;
-        persist(req.paneId, { bounds: { ...win.getNormalBounds(), maximized: false } });
+        persist(paneId, { bounds: { ...win.getNormalBounds(), maximized: false } });
     };
     win.on('moved', save);
     win.on('resized', save);
 
-    // Minimize sends the pane to the tray, not to the taskbar. Panes are small
-    // and numerous; a taskbar full of them is noise, and the tray already lists
-    // them. Electron's 'minimize' is not cancellable (the listener takes no
-    // event), so we hide immediately after rather than preventing it — and since
-    // the window is skipTaskbar there is no minimize animation to see.
+    // Minimize sends a pane to the tray, not the taskbar. Panes are small and
+    // numerous; a taskbar full of them is noise, and the tray already lists them.
+    // Electron's 'minimize' is not cancellable here (the listener takes no event),
+    // so we hide right after rather than preventing it — and the window is
+    // skipTaskbar, so there is no animation to see.
     win.on('minimize', () => {
         win.hide();
         refreshTray();
     });
 
     win.on('closed', () => {
-        windows.delete(req.paneId);
-        // Tell the renderer, or the pane stays "open" in its registry forever —
-        // and the dialog the pop-out chip hid never comes back, leaving the user
-        // with no way to reach their own UI.
-        notifyRenderer(IPC_PANE_EVENT_CLOSED, { paneId: req.paneId });
+        windows.delete(paneId);
         refreshTray();
+        // No IPC needed to tell the renderer: it opened this window itself and holds
+        // the WindowProxy, so it already knows — and it has to, because its element
+        // is inside and must be brought home.
     });
 
-    void win.loadURL(req.url);
     refreshTray();
-    return true;
-}
-
-function closePane(paneId: string): void {
-    const win = windows.get(paneId);
-    windows.delete(paneId);
-    if (win && !win.isDestroyed()) win.destroy();
 }
 
 export function closeAllPanes(): void {
-    // Called when the main window goes. A pane window can never be fed again
-    // without it — and worse, a HIDDEN pane window is still an open window, so
-    // leaving one behind would keep `window-all-closed` from ever firing and the
-    // app would linger as an invisible process.
-    Array.from(windows.keys()).forEach(closePane);
+    // Called when the main window goes. A pane window holds a DOM node belonging to
+    // the main window's document — with the main window gone there is nothing left
+    // to dock it back into. And worse: a pane HIDDEN in the tray is still an open
+    // window, so leaving one behind would stop `window-all-closed` from ever firing
+    // and the app would linger as an invisible process.
+    Array.from(windows.values()).forEach((win) => { if (!win.isDestroyed()) win.destroy(); });
+    windows.clear();
 }
 
 // ── Tray ────────────────────────────────────────────────────────────────────
 
-// The renderer's last known pane registry. The tray menu is built from this plus
-// the live window state, so the tray can offer panes it knows nothing else about.
+// The renderer's last known pane registry. The tray menu is a VIEW of it, never a
+// second copy — main has no idea what a pane contains, and does not need one.
 let lastSync: TrayPane[] = [];
 
 function refreshTray(): void {
@@ -185,68 +146,16 @@ function refreshTray(): void {
         const win = windows.get(p.id);
         return {
             ...p,
-            // "open" from the tray's point of view means "has a visible window".
-            // A pane docked inside the main window is not something the tray can
-            // usefully show or hide.
+            // "open", to the tray, means "has a visible window". A pane docked inside
+            // the main window is not something the tray can usefully show or hide.
             open: !!win && !win.isDestroyed() && win.isVisible(),
         };
     }));
 }
 
-// ── Wiring ──────────────────────────────────────────────────────────────────
-
-export function initPaneHosts(deps: {
-    getMainWindow: () => BrowserWindow | null;
-    isRendererOrigin: (url: string) => boolean;
-    webPreferences: Electron.WebPreferences;
-}): void {
-    getMainWindow = deps.getMainWindow;
-    isRendererOrigin = deps.isRendererOrigin;
-
-    ipcMain.handle(IPC_PANE_OPEN, (_event, req: unknown) => openPane(req as PaneOpenRequest, deps.webPreferences));
-
-    ipcMain.handle(IPC_PANE_CLOSE, (_event, paneId: unknown) => {
-        if (typeof paneId !== 'string') return false;
-        closePane(paneId);
-        refreshTray();
-        return true;
-    });
-
-    ipcMain.handle(IPC_PANE_FOCUS, (_event, paneId: unknown) => {
-        if (typeof paneId !== 'string') return false;
-        const win = windows.get(paneId);
-        if (!win || win.isDestroyed()) return false;
-        if (!win.isVisible()) win.show();
-        win.focus();
-        refreshTray();
-        return true;
-    });
-
-    ipcMain.handle(IPC_PANE_SET_ALWAYS_ON_TOP, (_event, paneId: unknown, value: unknown) => {
-        if (typeof paneId !== 'string') return false;
-        const on = value === true;
-        const win = windows.get(paneId);
-        if (win && !win.isDestroyed()) win.setAlwaysOnTop(on);
-        persist(paneId, { alwaysOnTop: on });
-        return true;
-    });
-
-    // The renderer pushes its registry whenever a pane is registered, opened or
-    // closed. Fire-and-forget: the tray is a view of the renderer's truth, never
-    // a second copy of it.
-    ipcMain.on(IPC_PANE_SYNC, (_event, panes: unknown) => {
-        lastSync = Array.isArray(panes)
-            ? panes.filter((p): p is TrayPane =>
-                !!p && typeof p.id === 'string' && typeof p.title === 'string')
-            : [];
-        refreshTray();
-    });
-}
-
-// Exposed for the tray: show/hide a pane window we already have.
 export function togglePaneWindow(paneId: string): boolean {
     const win = windows.get(paneId);
-    if (!win || win.isDestroyed()) return false;   // not open → the renderer must open it
+    if (!win || win.isDestroyed()) return false;   // not open → only the renderer can open it
     if (win.isVisible()) win.hide(); else win.show();
     refreshTray();
     return true;
@@ -265,4 +174,24 @@ export function hideAllPaneWindows(): void {
 export function hasPaneWindow(paneId: string): boolean {
     const win = windows.get(paneId);
     return !!win && !win.isDestroyed();
+}
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
+
+export function initPaneHosts(deps: { getMainWindow: () => BrowserWindow | null }): void {
+    getMainWindow = deps.getMainWindow;
+
+    // The renderer pushes its registry whenever a pane is registered, opened or
+    // closed, so the tray can list panes it otherwise knows nothing about.
+    // Fire-and-forget: the tray is a view of the renderer's truth.
+    ipcMain.on(IPC_PANE_SYNC, (_event, panes: unknown) => {
+        lastSync = Array.isArray(panes)
+            ? panes.filter((p): p is TrayPane => !!p && typeof p.id === 'string' && typeof p.title === 'string')
+            : [];
+        refreshTray();
+    });
+}
+
+export function getMainWindowRef(): BrowserWindow | null {
+    return getMainWindow();
 }

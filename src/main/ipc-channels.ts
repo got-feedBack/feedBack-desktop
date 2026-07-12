@@ -33,26 +33,21 @@ export const IPC_MAINTENANCE_RESTART = 'maintenance:restart' as const;
 // powerSaveBlocker here instead. See got-feedback/feedback#686.
 export const IPC_POWER_SET_SCREEN_AWAKE = 'power:setScreenAwake' as const;
 
-// Detachable panes (feedBack core's window.feedBack.panes). The renderer owns
-// the truth — which panes exist, which are open, and what goes in them; the main
-// process owns the OS surfaces: one BrowserWindow per popped-out pane, their
-// remembered geometry, and the system tray.
+// Detachable panes (feedBack core's window.feedBack.panes).
 //
-// The pane window loads <renderer origin>/pane, so it shares the renderer's
-// BroadcastChannel scope and talks to the app over the same channel a browser
-// pop-out would. Main never sees a pane's contents.
-export const IPC_PANE_OPEN = 'pane:open' as const;
-export const IPC_PANE_CLOSE = 'pane:close' as const;
-export const IPC_PANE_FOCUS = 'pane:focus' as const;
-export const IPC_PANE_SET_ALWAYS_ON_TOP = 'pane:setAlwaysOnTop' as const;
-// The renderer pushes its pane registry up whenever it changes, so the tray menu
-// can list panes it otherwise knows nothing about.
+// Deliberately tiny. The renderer OPENS its own pane windows with window.open() —
+// it has to, because it moves a live DOM node into them and needs a handle on the
+// new document to do it (see pane-hosts.ts). Electron turns that same-origin
+// window.open() into a real BrowserWindow, and main recognises it by its frame
+// name. So there is no open/close/focus channel: main never creates or destroys a
+// pane window, it only dresses one up.
+//
+// That leaves exactly two things to say across the boundary.
+
+// Renderer → main: the pane registry, so the tray can list panes it otherwise
+// knows nothing about.
 export const IPC_PANE_SYNC = 'pane:sync' as const;
 
-// One-way pushes, main → renderer.
-// A pane window the user closed (or that crashed): the renderer must close the
-// pane so the chip's hidden dialog comes back.
-export const IPC_PANE_EVENT_CLOSED = 'pane:closed' as const;
-// The tray asked for a pane to be opened or closed. The renderer decides what
-// that means and calls back through pane:open / pane:close.
+// Main → renderer: the tray asked to open or close a pane. Only the renderer knows
+// what that means — the pane may belong in the dock, and its element lives there.
 export const IPC_PANE_EVENT_TOGGLE = 'pane:toggle' as const;

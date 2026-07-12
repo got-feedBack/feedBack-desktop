@@ -126,7 +126,7 @@ import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
 import { installAppMenu } from './app-menu';
 import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
-import { initPaneHosts, closeAllPanes } from './pane-hosts';
+import { initPaneHosts, closeAllPanes, adoptPaneWindow, paneIdFromFrameName } from './pane-hosts';
 import { initTray, destroyTray } from './pane-tray';
 
 // Linux: enable Chromium's PipeWire capturer feature so getUserMedia can see
@@ -781,8 +781,15 @@ function createWindow(port: number): void {
         wc.setWindowOpenHandler(rendererWindowOpenHandler);
         wc.on('did-create-window', (nestedWin) => wirePopupGuards(nestedWin.webContents));
     }
-    mainWindow.webContents.on('did-create-window', (popupWin) => {
+    mainWindow.webContents.on('did-create-window', (popupWin, details) => {
         wirePopupGuards(popupWin.webContents);
+        // A pane pop-out. The RENDERER opened it (window.open) because it moves a
+        // live DOM node into it and needs a handle on the new document to do that —
+        // see pane-hosts.ts. We recognise it by the frame name it was opened with
+        // and give it the OS behaviour a pane should have: remembered bounds, off
+        // the taskbar, minimize-to-tray, listed in the tray menu.
+        const paneId = paneIdFromFrameName(details.frameName || '');
+        if (paneId) adoptPaneWindow(popupWin, paneId);
     });
 
     mainWindow.on('closed', () => {
@@ -1176,17 +1183,11 @@ async function startup(): Promise<void> {
     // Create the main window
     createWindow(port);
 
-    // Detachable panes: real BrowserWindows for popped-out panes, plus the tray
-    // that lists them. Must come after createWindow — the pane host and the tray
-    // both reach the renderer through mainWindow, and Tray requires a ready app.
-    // The origin predicate is the same one the navigation guards use, so a pane
-    // window can only ever load OUR renderer, never arbitrary web content with
-    // the preload bridge attached.
-    initPaneHosts({
-        getMainWindow: () => mainWindow,
-        isRendererOrigin: makeRendererOriginPredicate(port),
-        webPreferences: rendererWebPreferences,
-    });
+    // Detachable panes: the tray that lists them, and the OS behaviour applied to
+    // each pane window as the renderer opens it (see did-create-window above).
+    // Must come after createWindow — both reach the renderer through mainWindow,
+    // and Tray requires a ready app.
+    initPaneHosts({ getMainWindow: () => mainWindow });
     initTray({ getMainWindow: () => mainWindow });
 
     // Install our application menu (replaces Electron's default so View →

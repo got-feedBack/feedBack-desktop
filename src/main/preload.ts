@@ -33,12 +33,7 @@ import {
     IPC_MAINTENANCE_GET_PATHS,
     IPC_MAINTENANCE_RESET,
     IPC_MAINTENANCE_RESTART,
-    IPC_PANE_OPEN,
-    IPC_PANE_CLOSE,
-    IPC_PANE_FOCUS,
-    IPC_PANE_SET_ALWAYS_ON_TOP,
     IPC_PANE_SYNC,
-    IPC_PANE_EVENT_CLOSED,
     IPC_PANE_EVENT_TOGGLE,
 } from './ipc-channels';
 
@@ -585,33 +580,15 @@ const feedBackDesktopApi = {
     power: {
         setScreenAwake: (keep: boolean) => ipcRenderer.invoke(IPC_POWER_SET_SCREEN_AWAKE, keep),
     },
-    // Detachable panes. feedBack core's pane system (window.feedBack.panes) pops
-    // a pane out with window.open() in a browser; here it asks for a real
-    // BrowserWindow instead — one that remembers where you put it, can float
-    // above everything, and lives in the system tray.
-    //
-    // The renderer stays the authority: it says which panes exist and what goes
-    // in them, and pushes that registry up with sync() so the tray can list them.
-    // Main only owns the windows. Note the pane window loads the renderer's OWN
-    // origin (/pane), so it shares the BroadcastChannel the app feeds panes over.
+    // Detachable panes. The renderer opens its own pane windows with window.open()
+    // — it moves a live DOM node into them and needs a handle on the new document
+    // to do it — and Electron turns that into a real BrowserWindow, which main
+    // recognises by its frame name and gives remembered bounds, skip-taskbar and a
+    // tray entry. So there is nothing here about opening or closing windows: only
+    // the registry the tray needs, and the tray asking for a pane.
     panes: {
-        open: (req: { paneId: string; url: string; title: string; width?: number; height?: number }) =>
-            ipcRenderer.invoke(IPC_PANE_OPEN, req),
-        close: (paneId: string) => ipcRenderer.invoke(IPC_PANE_CLOSE, paneId),
-        focus: (paneId: string) => ipcRenderer.invoke(IPC_PANE_FOCUS, paneId),
-        setAlwaysOnTop: (paneId: string, value: boolean) =>
-            ipcRenderer.invoke(IPC_PANE_SET_ALWAYS_ON_TOP, paneId, value),
         sync: (panes: Array<{ id: string; title: string; icon?: string; open?: boolean }>) =>
             ipcRenderer.send(IPC_PANE_SYNC, panes),
-        // The user closed a pane window (or it crashed). The renderer must close
-        // the pane, or the dialog its pop-out chip hid never comes back.
-        onClosed: (callback: (paneId: string) => void) => {
-            const listener = (_event: unknown, payload: { paneId: string }) => callback(payload.paneId);
-            ipcRenderer.on(IPC_PANE_EVENT_CLOSED, listener);
-            return () => ipcRenderer.removeListener(IPC_PANE_EVENT_CLOSED, listener);
-        },
-        // The tray asked to open/close a pane it has no window for. Only the
-        // renderer knows what that means.
         onToggle: (callback: (paneId: string) => void) => {
             const listener = (_event: unknown, payload: { paneId: string }) => callback(payload.paneId);
             ipcRenderer.on(IPC_PANE_EVENT_TOGGLE, listener);
