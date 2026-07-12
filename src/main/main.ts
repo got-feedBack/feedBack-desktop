@@ -126,6 +126,8 @@ import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
 import { installAppMenu } from './app-menu';
 import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
+import { initPaneHosts, closeAllPanes } from './pane-hosts';
+import { initTray, destroyTray } from './pane-tray';
 
 // Linux: enable Chromium's PipeWire capturer feature so getUserMedia can see
 // audio devices on PipeWire-only distros (Fedora 36+, recent Ubuntu, Arch).
@@ -785,6 +787,13 @@ function createWindow(port: number): void {
 
     mainWindow.on('closed', () => {
         mainWindow = null;
+        // Pane windows cannot outlive the window that feeds them: without the
+        // renderer there is nothing on the other end of their BroadcastChannel,
+        // so they would sit there showing a frozen playhead forever. Worse, a
+        // pane HIDDEN in the tray is still an open window — leaving one behind
+        // would stop `window-all-closed` from ever firing and the app would
+        // linger as an invisible process.
+        closeAllPanes();
     });
 
     // Dev tools in development
@@ -1167,6 +1176,19 @@ async function startup(): Promise<void> {
     // Create the main window
     createWindow(port);
 
+    // Detachable panes: real BrowserWindows for popped-out panes, plus the tray
+    // that lists them. Must come after createWindow — the pane host and the tray
+    // both reach the renderer through mainWindow, and Tray requires a ready app.
+    // The origin predicate is the same one the navigation guards use, so a pane
+    // window can only ever load OUR renderer, never arbitrary web content with
+    // the preload bridge attached.
+    initPaneHosts({
+        getMainWindow: () => mainWindow,
+        isRendererOrigin: makeRendererOriginPredicate(port),
+        webPreferences: rendererWebPreferences,
+    });
+    initTray({ getMainWindow: () => mainWindow });
+
     // Install our application menu (replaces Electron's default so View →
     // Zoom In also accepts the unshifted Ctrl+= key — see app-menu.ts).
     installAppMenu();
@@ -1373,6 +1395,7 @@ function shutdown(): void {
     try {
         console.log('[main] Shutting down...');
     } catch { /* console may already be gone mid-teardown */ }
+    destroyTray();
     powerAwakeRenderers.clear();
     syncPowerBlocker();
     updateManager.shutdown();

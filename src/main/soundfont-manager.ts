@@ -38,6 +38,17 @@ interface DesktopConfig {
     // Last main-window geometry, restored (after sanitization against the
     // current display layout) on next launch — see window-bounds.ts.
     windowBounds?: SavedWindowBounds;
+    // Per-pane pop-out window geometry, keyed by pane id, plus its always-on-top
+    // flag. Sanitized against the display layout on restore, exactly like
+    // windowBounds — see pane-hosts.ts. Lives in the desktop config rather than
+    // the renderer's localStorage because localStorage is shared with the pane
+    // windows themselves (same origin), and a second writer there would race.
+    paneWindows?: Record<string, SavedPaneWindow>;
+}
+
+export interface SavedPaneWindow {
+    bounds?: SavedWindowBounds;
+    alwaysOnTop?: boolean;
 }
 
 function configPath(): string {
