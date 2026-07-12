@@ -5,9 +5,23 @@
 // ── Backing-track loudness normalizer ───────────────────────────────────────
 // Brings the SONG's backing track to a target loudness (default -12 LUFS) so
 // every song sits at the same level, BEFORE the mixer's backing-volume fader
-// (so lowering that fader still lowers it). Short-term BS.1770 K-weighted AGC
-// (slow, no pumping) + a brickwall limiter to keep boosted peaks safe.
-// RT-safe: no allocation in process(). Standard K-weighting here (full-mix
+// (so lowering that fader still lowers it).
+//
+// v2 — PER-SONG TRIM, not a running AGC. The first version tracked SHORT-TERM
+// (400 ms) loudness with a ~300 ms gain follower and ±24 dB of authority: that
+// re-converges on every musical section, so quiet verses got boosted toward
+// -12 and loud choruses pulled down — the song's own macro-dynamics were
+// flattened, and loud→quiet transitions left the gain low for a beat ("the
+// song suddenly plays quiet, then swells back"). Loudness normalization should
+// behave like a per-track gain (Spotify-style), not a compressor.
+//
+// Design: BS.1770 K-weighted **integrated** loudness accumulated over the
+// song (gated below -50 LUFS so silence/noise doesn't dilute it). The make-up
+// gain slews toward (target − integrated) FAST while the measurement is young
+// (first ~8 s of signal: up to 6 dB/s, inaudible as the song is just starting)
+// and then locks down to a barely-moving trim (0.25 dB/s) — verse/chorus
+// dynamics pass through untouched. A -1 dBFS brickwall still guards boosted
+// peaks. RT-safe: no allocation in process(). Standard K-weighting (full-mix
 // music) — unlike the per-tone leveler which is flattened for bass fidelity.
 class BackingLeveler
 {
@@ -17,6 +31,9 @@ public:
         sr = (sampleRate > 0.0) ? sampleRate : 48000.0;
         designKWeighting(sr);
         msEnv = 0.0;
+        intSum = 0.0;
+        intSamples = 0;
+        signalSeconds = 0.0;
         currentGainDb = 0.0;
         limGain = 1.0f;
         for (int ch = 0; ch < 2; ++ch) { kPre[ch].reset(); kRlb[ch].reset(); }
@@ -28,7 +45,8 @@ public:
         const int nc = juce::jmin(2, buf.getNumChannels());
         if (nc <= 0 || numSamples <= 0) return;
 
-        // Short-term (~400 ms) K-weighted mean-square, integrated per sample.
+        // K-weighted mean-square: a short envelope for the signal gate, and a
+        // gated INTEGRATED accumulator for the actual measurement.
         const double rmsCoef = 1.0 - std::exp(-1.0 / (0.400 * sr));
         for (int i = 0; i < numSamples; ++i)
         {
@@ -40,17 +58,32 @@ public:
             }
             sq /= (double) nc;
             msEnv += rmsCoef * (sq - msEnv);
+            // Gate the integration on the short-term envelope so leading
+            // silence / count-ins / fade tails don't dilute the measurement.
+            if (msEnv > 1.0e-5)   // ≈ -50 LUFS
+            {
+                intSum += sq;
+                ++intSamples;
+            }
         }
-        const double lufs = (msEnv > 1e-12) ? (-0.691 + 10.0 * std::log10(msEnv)) : -120.0;
-        const bool hasSignal = lufs > -50.0;   // gate: don't lift silence/noise
 
-        double wantedDb = currentGainDb;
-        if (hasSignal)
-            wantedDb = juce::jlimit(-24.0, 24.0, (double) targetLufs - lufs);
+        const bool haveMeasure = intSamples > (juce::int64) (0.5 * sr);   // ≥ 0.5 s of signal
+        if (haveMeasure)
+        {
+            const double intMs = intSum / (double) intSamples;
+            const double integratedLufs = -0.691 + 10.0 * std::log10(juce::jmax(1.0e-12, intMs));
+            const double wantedDb = juce::jlimit(-12.0, 12.0, (double) targetLufs - integratedLufs);
 
-        // Slow gain follower (~300 ms) so it normalizes loudness without pumping.
-        const double smCoef = 1.0 - std::exp(-(double) numSamples / (0.300 * sr));
-        currentGainDb += (wantedDb - currentGainDb) * juce::jlimit(0.0, 1.0, smCoef);
+            // Slew limit instead of a time-constant follower: fast while the
+            // song is starting (the measurement is still forming), then locked
+            // to a creep so in-song dynamics are never ridden.
+            const double blockSec = (double) numSamples / sr;
+            signalSeconds += blockSec;
+            const double maxDbPerSec = (signalSeconds < 8.0) ? 6.0 : 0.25;
+            const double step = juce::jlimit(-maxDbPerSec * blockSec, maxDbPerSec * blockSec,
+                                             wantedDb - currentGainDb);
+            currentGainDb += step;
+        }
         const float g = (float) juce::Decibels::decibelsToGain(currentGainDb);
 
         // Brickwall limiter (-1 dBFS ceiling): instant attack, ~100 ms release.
@@ -108,6 +141,9 @@ private:
         }
     }
     double sr = 48000.0, msEnv = 0.0, currentGainDb = 0.0;
+    double intSum = 0.0;
+    juce::int64 intSamples = 0;
+    double signalSeconds = 0.0;
     float limGain = 1.0f;
     Biquad kPre[2], kRlb[2];
 };
