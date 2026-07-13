@@ -127,6 +127,7 @@ clone_slopsmith() {
 	cd "$clone_dir/plugins"
 	local plugins=(
 		# Bundled plugins — all under the got-feedback org after the migration.
+		got-feedback/feedback-plugin-bongocat
 		got-feedback/feedback-plugin-drums
 		got-feedback/feedback-plugin-editor
 		got-feedback/feedback-plugin-flappy-bend
