@@ -484,7 +484,7 @@ function createWindow(port: number): void {
         backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
         webPreferences: rendererWebPreferences,
     });
-    if (restored.maximized) mainWindow.maximize();
+    if (restored.maximized && !startFullscreen) mainWindow.maximize();
 
     // Persist geometry on close. getNormalBounds() so a maximized session
     // saves the underlying windowed size, restored + re-maximized next launch.
