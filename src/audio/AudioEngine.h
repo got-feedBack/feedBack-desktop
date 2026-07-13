@@ -4,6 +4,7 @@
 #include "engine/PackedStereoRing.h"
 #include "engine/EngineState.h"
 #include "engine/RendererBus.h"
+#include "engine/StreamSink.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -252,18 +253,13 @@ public:
     // setStreamOutputDevice returns "" on success or an error string.
     juce::String setStreamOutputDevice(const juce::String& typeName, const juce::String& deviceName);
     void clearStreamOutput();
-    bool isStreamOutputActive() const { return streamSink.active.load(std::memory_order_acquire); }
-    juce::String getStreamOutputDeviceName() const { return streamSink.desiredDeviceName; }
+    bool isStreamOutputActive() const { return streamSink.isActive(); }
+    juce::String getStreamOutputDeviceName() const { return streamSink.getDesiredDeviceName(); }
     // Bus content: include the backing/game, include the guitar monitor mix, and a
     // linear output gain. All atomic — safe to set live. Gain is sanitised
     // (finite, clamped 0..8) so a NaN/Inf from JS can never reach the stream ring.
-    void setStreamBus(bool includeBacking, bool includeGuitar, float gain)
-    {
-        streamBusIncludeBacking.store(includeBacking, std::memory_order_relaxed);
-        streamBusIncludeGuitar.store(includeGuitar, std::memory_order_relaxed);
-        streamBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed);
-    }
-    void setStreamBusGain(float gain) { streamBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed); }
+    void setStreamBus(bool includeBacking, bool includeGuitar, float gain) { streamSink.setBus(includeBacking, includeGuitar, gain); }
+    void setStreamBusGain(float gain) { streamSink.setBusGain(gain); }
 
     // ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ─────────
     // The renderer pushes its WebAudio master mix here (via IPC) so song/stem
@@ -285,11 +281,11 @@ public:
     };
     RendererBusMetrics getRendererBusMetrics() const;
 
-    float getStreamSinkLevel() const { return streamSinkLevel.load(std::memory_order_relaxed); }
-    uint64_t getStreamUnderflowCount() const { return streamSink.underflowCount.load(std::memory_order_relaxed); }
+    float getStreamSinkLevel() const { return streamSink.getLevel(); }
+    uint64_t getStreamUnderflowCount() const { return streamSink.getUnderflowCount(); }
     // Producer overflow (drop-oldest): the consumer fell a full ring behind and
     // frames were skipped. Exposed alongside underflow for stream drift diagnosis.
-    uint64_t getStreamOverflowCount() const { return streamSink.overflowCount.load(std::memory_order_relaxed); }
+    uint64_t getStreamOverflowCount() const { return streamSink.getOverflowCount(); }
 
     // Latency
     double getLatencyMs() const;
@@ -658,84 +654,16 @@ private:
                             juce::AudioBuffer<float>& mixBuf, juce::AudioBuffer<float>& monitorScratch,
                             int effectiveOutputChannels, int numSamples);
 
-    // ── Streamer mix output sink (PR1) ───────────────────────────────────────
-    // A second OUTPUT AudioDeviceManager on its OWN clock that drains a dedicated
-    // SPSC ring fed by the main output path's composed stream submix. This mirrors
-    // the InputDeviceSlot pattern INVERTED to the output side: the PRODUCER is the
-    // primary/output callback (composeAndPushStreamMix), the CONSUMER is this extra
-    // output device's callback (streamSinkCallback). Default off → no behaviour change.
-    struct StreamSinkCallback : juce::AudioIODeviceCallback
-    {
-        AudioEngine* engine = nullptr;
-        void audioDeviceIOCallbackWithContext(const float* const* inputData, int numInputChannels,
-                                              float* const* outputData, int numOutputChannels,
-                                              int numSamples,
-                                              const juce::AudioIODeviceCallbackContext&) override
-        {
-            juce::ignoreUnused(inputData, numInputChannels);
-            if (engine) engine->streamSinkCallback(outputData, numOutputChannels, numSamples);
-        }
-        void audioDeviceAboutToStart(juce::AudioIODevice* d) override { if (engine) engine->streamSinkAboutToStart(d); }
-        void audioDeviceStopped() override { if (engine) engine->streamSinkStopped(); }
-    };
-    struct StreamSink
-    {
-        StreamSinkCallback callback;
-        slopsmith::PackedStereoRing<kOutputRingFrames> ring;
-        std::atomic<uint64_t> underflowCount{0};
-        std::atomic<uint64_t> overflowCount{0};
-        std::atomic<bool> active{false};
-        std::atomic<double> sampleRate{48000.0};
-        std::atomic<int> blockSize{256};
-        std::vector<float> pullScratchL, pullScratchR;  // sized in streamSinkAboutToStart
-        bool callbackRegistered = false;
-        bool initialised = false;
-        // Declared LAST so it DESTRUCTS FIRST (members tear down in reverse
-        // declaration order): the manager's dtor closes the device and detaches
-        // `callback` while `callback`/`ring` are still alive — no use-after-free
-        // even if an explicit teardown path is ever missed. stopAudio() /
-        // closeStreamSinkDevice() also tear it down explicitly before this.
-        juce::AudioDeviceManager manager;
-        // Persistent INTENT (control thread only): the device the user chose.
-        // Survives a stop/restart so reopenDesiredStreamSink() can re-open it.
-        juce::String desiredTypeName;
-        juce::String desiredDeviceName;
-    };
-    StreamSink streamSink;
-    std::atomic<bool>  streamBusIncludeBacking{true};
-    std::atomic<bool>  streamBusIncludeGuitar{true};
-    std::atomic<float> streamBusGain{1.0f};
-    std::atomic<float> streamSinkLevel{0.0f};
-    // Producer-side scratch (written by the primary/output callback): the guitar
-    // monitor-mix snapshot (pre-backing) and the composed stream submix. Sized in
+    // ── Streamer mix output sink — moved to engine/StreamSink.{h,cpp} (TLC
+    // phase 2). Declared after `state` (bound by reference).
+    slopsmith::StreamSink streamSink{state};
+    // Producer-side guitar monitor-mix snapshot (pre-backing), written by the
+    // primary/output callback and handed to streamSink.publish(). Sized in
     // audioDeviceAboutToStart / audioOutputAboutToStart alongside the other scratch.
     juce::AudioBuffer<float> streamGuitarScratch;
-    juce::AudioBuffer<float> streamMixScratch;
 
     // Clamp a requested stream gain to a finite, sane range so a NaN/Inf (or a
     // wild value) from the JS bridge can never be packed into the stream ring.
     static float sanitizeStreamGain(float g) { return slopsmith::sanitizeStreamGain(g); }
-
-    void streamSinkCallback(float* const* outputData, int numOutputChannels, int numSamples);
-    void streamSinkAboutToStart(juce::AudioIODevice* device);
-    void streamSinkStopped();
-    void reopenDesiredStreamSink();
-    // Detach + close the stream-sink device but KEEP desiredTypeName/Name, so a
-    // stopAudio()/startAudio() cycle re-opens it (intent survives, like extra
-    // inputs). Also the single teardown used by the dtor and clearStreamOutput().
-    void closeStreamSinkDevice();
-    // Compose the stream submix from the captured guitar mix + the just-rendered
-    // backing block + the just-pulled renderer-bus block and pack it into the
-    // stream ring. Called from both output callbacks after backing render.
-    // `backingBuf` / `rendererBuf` may be null (not playing / bus gated).
-    // The renderer bus rides the includeBacking flag: it IS song audio, just
-    // fed from the renderer instead of the native transport (bus gain already
-    // applied by pullRendererBus).
-    void composeAndPushStreamMix(const juce::AudioBuffer<float>& guitarMix,
-                                 const juce::AudioBuffer<float>* backingBuf,
-                                 int backingFrames, float backingVol,
-                                 const juce::AudioBuffer<float>* rendererBuf,
-                                 int rendererFrames, int numSamples);
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
