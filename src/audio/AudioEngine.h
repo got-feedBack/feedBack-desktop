@@ -6,6 +6,7 @@
 #include "engine/RendererBus.h"
 #include "engine/StreamSink.h"
 #include "engine/BackingPlayer.h"
+#include "engine/DeviceSetup.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -68,39 +69,12 @@ public:
         juce::StringArray inputDevices;
         juce::StringArray outputDevices;
     };
-    struct DeviceOptions
-    {
-        juce::String type;          // legacy alias = inputType
-        juce::String inputType;
-        juce::String outputType;
-        juce::String input;
-        juce::String output;
-        juce::StringArray inputChannels;
-        juce::StringArray outputChannels;
-        juce::Array<double> sampleRates;   // intersection when dual-type
-        juce::Array<int> bufferSizes;
-        bool compatible = true;     // false when types share no usable sample rate
-        juce::String error;
-    };
-
-    struct DeviceConfig
-    {
-        juce::String inputType;
-        juce::String inputDevice;
-        juce::String outputType;
-        juce::String outputDevice;
-        double sampleRate = 48000.0;
-        int bufferSize = 256;
-    };
-    struct DeviceConfigResult
-    {
-        bool ok = false;
-        juce::String error;
-        double sampleRate = 0.0;
-        int inputBlockSize = 0;
-        int outputBlockSize = 0;
-        bool duplex = true;
-    };
+    // Device-config shapes moved to engine/DeviceSetup.h (TLC phase 4);
+    // aliased so the AudioEngine::DeviceOptions etc. spelling NodeAddon uses
+    // is unchanged.
+    using DeviceOptions = slopsmith::DeviceOptions;
+    using DeviceConfig = slopsmith::DeviceConfig;
+    using DeviceConfigResult = slopsmith::DeviceConfigResult;
 
     struct DeviceMetrics
     {
@@ -417,11 +391,8 @@ private:
     };
     OutputCallback outputCallback{ *this };
 
-    juce::String applyDuplexSetup(const juce::String& inputName,
-                                  const juce::String& outputName,
-                                  double sampleRate,
-                                  int bufferSize);
-    DeviceConfigResult applySplitSetup(const DeviceConfig& config);
+    // Probe/apply/teardown moved to engine/DeviceSetup (TLC phase 4);
+    // setAudioDevices stays here as the orchestrator.
     void teardownSplitMode();
 
     // Duplex mode: inputDeviceManager owns both directions, outputDeviceManager idle.
@@ -435,6 +406,8 @@ private:
     // untouched; extracted units take `state` (EngineState&) directly.
     slopsmith::EngineState state;
     std::atomic<bool>& duplexMode = state.duplexMode;
+    // Probe/apply/teardown component (TLC phase 4). Holds references only.
+    slopsmith::DeviceSetup deviceSetup{ inputDeviceManager, outputDeviceManager, state };
 
     // Per-input capture+detect+monitor chains. A FIXED pool, all constructed up
     // front, so adding/removing a source never reassigns a pointer the audio

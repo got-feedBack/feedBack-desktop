@@ -20,3 +20,7 @@ add_test(NAME engine_state COMMAND engine_state_test)
 add_executable(renderer_bus_test renderer_bus_test.cpp)
 target_compile_features(renderer_bus_test PRIVATE cxx_std_20)
 add_test(NAME renderer_bus COMMAND renderer_bus_test)
+
+add_executable(rate_match_test rate_match_test.cpp)
+target_compile_features(rate_match_test PRIVATE cxx_std_17)
+add_test(NAME rate_match COMMAND rate_match_test)

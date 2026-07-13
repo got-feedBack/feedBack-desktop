@@ -8,6 +8,7 @@ set(AUDIO_SOURCES
     AudioEngine.cpp
     engine/StreamSink.cpp
     engine/BackingPlayer.cpp
+    engine/DeviceSetup.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp
