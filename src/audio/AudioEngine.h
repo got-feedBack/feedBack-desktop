@@ -3,6 +3,7 @@
 #include "GainSanitize.h"
 #include "engine/PackedStereoRing.h"
 #include "engine/EngineState.h"
+#include "engine/RendererBus.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -270,20 +271,7 @@ public:
     // mixer path is silenced. SPSC: producer is the main-process IPC thread,
     // consumer is whichever output callback is live (duplex or split). Default
     // off → zero behaviour change.
-    void setRendererBus(bool enabled, float gain)
-    {
-        rendererBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed);
-        const bool was = rendererBusEnabled.exchange(enabled, std::memory_order_acq_rel);
-        if (was && !enabled)
-        {
-            // Drop buffered audio on disable so a later re-enable starts fresh
-            // instead of playing a stale tail. Consumer tolerates the jump.
-            rendererBusRing.readIndex.store(
-                rendererBusRing.writeIndex.load(std::memory_order_acquire),
-                std::memory_order_release);
-            rendererBusPrimed.store(false, std::memory_order_relaxed);
-        }
-    }
+    void setRendererBus(bool enabled, float gain) { rendererBus.setEnabled(enabled, gain); }
     // Interleaved stereo frames at `sourceRate`; linear-resampled to the device
     // rate on the producer thread (fractional position + previous frame carried
     // across calls). Returns false when the bus is disabled or the engine is
@@ -563,35 +551,8 @@ private:
     static constexpr int kOutputRingFrames = 4096;
     slopsmith::PackedStereoRing<kOutputRingFrames> outputRing;
 
-    // ── Renderer-audio bus ring (see setRendererBus/pushRendererAudio) ───────
-    // Same packed-LR SPSC design as outputRing. Sized generously
-    // (~1.5 s @ 48 kHz — vs outputRing's 85 ms) because the producer is
-    // an IPC thread with scheduling jitter, not another audio callback; the
-    // consumer trims steady-state fill via the drift clamp in the mix step.
-    static constexpr int kRendererBusFrames = 65536;
-    static_assert((kRendererBusFrames & (kRendererBusFrames - 1)) == 0,
-                  "kRendererBusFrames must be a power of two for mask wraparound");
-    // Prefill gate: consume nothing until the producer has built this cushion
-    // (~10.7 ms @ 48 kHz); re-armed after every underflow so stall recovery is
-    // one clean gap. Fill clamp: fill beyond this (~85 ms) means a renderer
-    // stall dumped a backlog — trim to the prime target, don't play the tail.
-    static constexpr int kRendererBusPrimeFrames   = 512;
-    static constexpr int kRendererBusMaxFillFrames = 4096;
-    slopsmith::PackedStereoRing<kRendererBusFrames> rendererBusRing;
-    std::atomic<uint64_t> rendererBusPushedFrames{0};
-    std::atomic<uint64_t> rendererBusConsumedFrames{0};
-    std::atomic<uint64_t> rendererBusUnderflowCount{0};
-    std::atomic<uint64_t> rendererBusOverflowCount{0};
-    std::atomic<bool>  rendererBusEnabled{false};
-    std::atomic<float> rendererBusGain{1.0f};
-    // Consumer-side prefill-gate state. Only the live output callback touches
-    // it, but duplex/split hand-offs cross threads — atomic keeps that safe.
-    std::atomic<bool>  rendererBusPrimed{false};
-    // Producer-thread-only linear-resampler state (fractional read position
-    // into the incoming chunk + the previous chunk's last frame for
-    // interpolation continuity across pushes).
-    double rendererBusSrcPos = 0.0;
-    float  rendererBusPrevL = 0.0f, rendererBusPrevR = 0.0f;
+    // ── Renderer-audio bus (see engine/RendererBus.h — moved in TLC phase 2)
+    slopsmith::RendererBus rendererBus;
     // Shared consumer step for the duplex and split output paths: drain one
     // block from the renderer-bus ring into `dest` (stereo, bus gain applied,
     // dest cleared first). Returns numSamples on success, 0 when gated

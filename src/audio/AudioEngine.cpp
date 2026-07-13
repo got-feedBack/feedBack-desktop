@@ -3039,126 +3039,28 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
 
 bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, double sourceRate)
 {
-    if (!rendererBusEnabled.load(std::memory_order_acquire)) return false;
-    if (interleavedLR == nullptr || frames <= 0) return false;
-    const double deviceRate = getCurrentSampleRate();
-    if (deviceRate <= 0.0) return false;
-    if (!(sourceRate > 0.0)) sourceRate = deviceRate;
-
-    uint64_t w = rendererBusRing.beginWrite();
-
-    // Linear resample source→device rate on this (IPC) thread. `pos` is the
-    // fractional read position into the incoming chunk; index -1 refers to the
-    // carried last frame of the previous chunk so interpolation is continuous
-    // across pushes. Equal rates degenerate to step == 1.0 (still exact:
-    // pos stays integral, frac == 0).
-    const double step = sourceRate / deviceRate;
-    double pos = rendererBusSrcPos;
-    uint64_t written = 0;
-    while (true)
-    {
-        const double ip = std::floor(pos);
-        const int i0 = (int) ip;
-        if (i0 + 1 >= frames) break;                 // next chunk continues from here
-        const float frac = (float) (pos - ip);
-        const float l0 = (i0 < 0) ? rendererBusPrevL : interleavedLR[(size_t) i0 * 2];
-        const float r0 = (i0 < 0) ? rendererBusPrevR : interleavedLR[(size_t) i0 * 2 + 1];
-        const float l1 = interleavedLR[((size_t) i0 + 1) * 2];
-        const float r1 = interleavedLR[((size_t) i0 + 1) * 2 + 1];
-        rendererBusRing.stageFrame(w, l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac);
-        ++w;
-        ++written;
-        pos += step;
-    }
-    rendererBusSrcPos = pos - (double) frames;       // relative to the next chunk
-    rendererBusPrevL = interleavedLR[((size_t) frames - 1) * 2];
-    rendererBusPrevR = interleavedLR[((size_t) frames - 1) * 2 + 1];
-
-    // Publish. Overflow (producer lapping the consumer) is handled consumer-
-    // side with drop-oldest — same contract as the extra-input rings — so only
-    // the consumer ever moves readIndex.
-    rendererBusRing.publish(w);
-    rendererBusPushedFrames.fetch_add(written, std::memory_order_relaxed);
-    return true;
+    // Producer-side resample + publish live on RendererBus (engine/RendererBus.h).
+    return rendererBus.push(interleavedLR, frames, sourceRate, getCurrentSampleRate());
 }
 
 int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
 {
-    if (!rendererBusEnabled.load(std::memory_order_acquire)) return 0;
     // Cold start before about-to-start sized the scratch — skip, never alloc
     // on the RT thread (same rule as the stream scratches).
     if (dest.getNumSamples() < numSamples || dest.getNumChannels() < 2) return 0;
-    const uint64_t w = rendererBusRing.writeIndex.load(std::memory_order_acquire);
-    uint64_t r = rendererBusRing.readIndex.load(std::memory_order_relaxed);
-    if (w - r > (uint64_t) kRendererBusFrames)
-    {
-        // Producer lapped us — drop-oldest to the newest full ring.
-        r = w - (uint64_t) kRendererBusFrames;
-        rendererBusOverflowCount.fetch_add(1, std::memory_order_relaxed);
-    }
-    uint64_t avail = w - r;
-
-    // Fill clamp (spike finding): steady-state drift is near zero, so a fill
-    // beyond kRendererBusMaxFill only ever means a renderer stall dumped a
-    // backlog. Trim to the prime target instead of playing the whole tail at
-    // ~85+ ms behind — a latency reset, not an audible gap.
-    if (avail > (uint64_t) kRendererBusMaxFillFrames)
-    {
-        r = w - (uint64_t) kRendererBusPrimeFrames;
-        avail = (uint64_t) kRendererBusPrimeFrames;
-        rendererBusOverflowCount.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    // Prefill gate (spike finding): the warmup underflow burst is the mix
-    // starting before the ring has a cushion. Consume nothing until the
-    // producer has built ~10 ms; re-arm the same gate after a real underflow
-    // so stall recovery is one clean gap, not a ragged refill.
-    if (!rendererBusPrimed)
-    {
-        if (avail < (uint64_t) kRendererBusPrimeFrames)
-        {
-            rendererBusRing.commitRead(r);
-            return 0;
-        }
-        rendererBusPrimed = true;
-    }
-    if (avail < (uint64_t) numSamples)
-    {
-        // Underflow: emit silence for the whole block (partial blocks blip),
-        // drop what's buffered, and go back to priming.
-        rendererBusPrimed = false;
-        rendererBusUnderflowCount.fetch_add(1, std::memory_order_relaxed);
-        rendererBusRing.commitRead(w);
-        return 0;
-    }
-
-    const int pull = numSamples;
-    const float g = rendererBusGain.load(std::memory_order_relaxed);
-    float* dl = dest.getWritePointer(0);
-    float* dr = dest.getWritePointer(1);
-    for (int i = 0; i < pull; ++i)
-    {
-        float l, rr;
-        rendererBusRing.readFrame(r + (uint64_t) i, l, rr);
-        dl[i] = l * g;
-        dr[i] = rr * g;
-    }
-    rendererBusRing.commitRead(r + (uint64_t) pull);
-    rendererBusConsumedFrames.fetch_add((uint64_t) pull, std::memory_order_relaxed);
-    return pull;
+    return rendererBus.pull(dest.getWritePointer(0), dest.getWritePointer(1), numSamples);
 }
 
 AudioEngine::RendererBusMetrics AudioEngine::getRendererBusMetrics() const
 {
+    const auto bm = rendererBus.metrics();
     RendererBusMetrics m;
-    m.pushedFrames   = rendererBusPushedFrames.load(std::memory_order_relaxed);
-    m.consumedFrames = rendererBusConsumedFrames.load(std::memory_order_relaxed);
-    m.underflowCount = rendererBusUnderflowCount.load(std::memory_order_relaxed);
-    m.overflowCount  = rendererBusOverflowCount.load(std::memory_order_relaxed);
-    const uint64_t w = rendererBusRing.writeIndex.load(std::memory_order_acquire);
-    const uint64_t r = rendererBusRing.readIndex.load(std::memory_order_acquire);
-    m.fillFrames = (int) juce::jmin(w - r, (uint64_t) kRendererBusFrames);
-    m.capacityFrames = kRendererBusFrames;
-    m.enabled = rendererBusEnabled.load(std::memory_order_relaxed);
+    m.pushedFrames   = bm.pushedFrames;
+    m.consumedFrames = bm.consumedFrames;
+    m.underflowCount = bm.underflowCount;
+    m.overflowCount  = bm.overflowCount;
+    m.fillFrames     = bm.fillFrames;
+    m.capacityFrames = bm.capacityFrames;
+    m.enabled        = bm.enabled;
     return m;
 }
