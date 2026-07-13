@@ -28,6 +28,7 @@
 
 #include "addon/AddonContext.h"
 #include "addon/NapiHelpers.h"
+#include "addon/ChainOps.h"
 
 // Lifetime/threading moved to addon/AddonContext (TLC phase 6); the usings
 // keep the 100+ existing binding bodies unchanged.
@@ -2064,6 +2065,9 @@ public:
 
     void Execute() override
     {
+        // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
+        // workers on the libuv pool must not interleave clear()/addProcessor().
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         // Snapshot engine + vstHost through their mutex-protected helpers so
         // shutdown's reset on the message thread can't race the worker's
         // dereferences below. The shared_ptr locals keep both objects alive
@@ -2250,6 +2254,9 @@ public:
 
     void Execute() override
     {
+        // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
+        // workers on the libuv pool must not interleave clear()/addProcessor().
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         auto liveEngine = snapshotEngine();
         if (!liveEngine) { slotId_ = -1; return; }
 
@@ -2298,6 +2305,9 @@ public:
 
     void Execute() override
     {
+        // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
+        // workers on the libuv pool must not interleave clear()/addProcessor().
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         auto liveEngine = snapshotEngine();
         if (!liveEngine) { slotId_ = -1; return; }
 
@@ -2357,6 +2367,9 @@ public:
 
     void Execute() override
     {
+        // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
+        // workers on the libuv pool must not interleave clear()/addProcessor().
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         auto liveEngine = snapshotEngine();
         if (!liveEngine) { ok_ = false; return; }
 
@@ -2414,7 +2427,11 @@ static Napi::Value RemoveProcessor(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     const auto slotId = slopsmith::addon::argSlotId(info, 0);
     if (liveEngine && slotId)
+    {
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         liveEngine->getSignalChain().removeProcessor(*slotId);
+        slopsmith::addon::bumpChainGeneration();
+    }
     return info.Env().Undefined();
 }
 
@@ -2424,7 +2441,11 @@ static Napi::Value MoveProcessor(const Napi::CallbackInfo& info)
     const auto from = slopsmith::addon::argSlotId(info, 0);
     const auto to = slopsmith::addon::argSlotId(info, 1);
     if (liveEngine && from && to)
+    {
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         liveEngine->getSignalChain().moveProcessor(*from, *to);
+        slopsmith::addon::bumpChainGeneration();
+    }
     return info.Env().Undefined();
 }
 
@@ -2451,7 +2472,15 @@ static Napi::Value ClearChain(const Napi::CallbackInfo& info)
 {
     // Tear editors down before their processors are freed just below (#56).
     closeAllPluginEditorWindows();
-    if (auto liveEngine = snapshotEngine()) liveEngine->getSignalChain().clear();
+    if (auto liveEngine = snapshotEngine())
+    {
+        // Serialized with the async chain workers (deep-read 1). May block
+        // briefly behind an in-flight preset/VST load -- that wait IS the fix
+        // for the interleaved clear-vs-rebuild corruption.
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
+        liveEngine->getSignalChain().clear();
+        slopsmith::addon::bumpChainGeneration();
+    }
     return info.Env().Undefined();
 }
 
@@ -2506,6 +2535,14 @@ static Napi::Value SetBranchSrc(const Napi::CallbackInfo& info)
 }
 
 // ── Chain State ───────────────────────────────────────────────────────────────
+
+// Monotonic chain-mutation counter (TLC phase 7): JS-side chain owners (the
+// audio-effects executor) compare this against the generation their load
+// returned to detect that another writer changed the chain under them.
+static Napi::Value GetChainGeneration(const Napi::CallbackInfo& info)
+{
+    return Napi::Number::New(info.Env(), (double) slopsmith::addon::currentChainGeneration());
+}
 
 static Napi::Value GetChainState(const Napi::CallbackInfo& info)
 {
@@ -3077,6 +3114,9 @@ public:
 
     void Execute() override
     {
+        // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
+        // workers on the libuv pool must not interleave clear()/addProcessor().
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         auto liveEngine = snapshotEngine();
         if (!liveEngine) { success_ = false; error_ = "No engine"; return; }
 
@@ -3188,8 +3228,9 @@ public:
                 juce::MemoryBlock state;
                 if (decodeStateBlob(stateB64, state, allowStandard))
                 {
-                    auto* slot = const_cast<ProcessorSlot*>(liveEngine->getSignalChain().getSlot(slotId));
-                    if (slot) slot->setState(state);
+                    // Through the class's own synchronized API (deep-read 9) --
+                    // no more const_cast around setSlotState's locking.
+                    liveEngine->getSignalChain().setSlotState(slotId, state);
                 }
             }
 
@@ -3197,6 +3238,7 @@ public:
         }
 
         success_ = true;
+        generation_ = slopsmith::addon::bumpChainGeneration();  // still under chainLock
     }
 
     void OnOK() override
@@ -3204,6 +3246,7 @@ public:
         auto obj = Napi::Object::New(Env());
         obj.Set("success", success_);
         obj.Set("slotsLoaded", slotsLoaded_);
+        obj.Set("chainGeneration", (double) generation_);
         if (!success_) obj.Set("error", error_);
         deferred_.Resolve(obj);
     }
@@ -3212,6 +3255,7 @@ public:
 private:
     Napi::Promise::Deferred deferred_;
     std::string presetJson_;
+    uint64_t generation_ = 0;
     bool success_ = false;
     std::string error_;
     int slotsLoaded_ = 0;
@@ -3458,6 +3502,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("setBranchSrc", Napi::Function::New(env, SetBranchSrc));
     exports.Set("clearChain", Napi::Function::New(env, ClearChain));
     exports.Set("getChainState", Napi::Function::New(env, GetChainState));
+    exports.Set("getChainGeneration", Napi::Function::New(env, GetChainGeneration));
     exports.Set("openPluginEditor", Napi::Function::New(env, OpenPluginEditor));
     exports.Set("closePluginEditor", Napi::Function::New(env, ClosePluginEditor));
 

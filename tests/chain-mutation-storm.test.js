@@ -46,7 +46,7 @@ function irPreset(irFile, slotCount) {
     });
 }
 
-test('concurrent loadPreset calls end with exactly one caller\'s chain', { skip: !ENABLED && 'quarantined — set CHAIN_STORM=1 (expected-fail until ChainOps serializer)' }, async () => {
+test('concurrent loadPreset calls end with exactly one caller\'s chain', { skip: !ENABLED && 'needs built addon — set CHAIN_STORM=1 (hard gate since the phase-7 serializer)' }, async () => {
     assert.ok(fs.existsSync(ADDON), 'addon must be built (npm run build:audio)');
     const audio = require(ADDON);
     audio.init(); // returns undefined; loadPreset fails "No engine" if it didn't take
