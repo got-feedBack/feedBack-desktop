@@ -36,10 +36,11 @@ export interface TrayPane {
 // through initTray().
 export interface TrayPaneActions {
     getMainWindow: () => Electron.BrowserWindow | null;
+    // Returns true if it owned a window for this pane and toggled it; false if it
+    // did not, in which case only the renderer can decide what opening it means.
     toggleWindow: (paneId: string) => boolean;
     showAll: () => void;
     hideAll: () => void;
-    hasWindow: (paneId: string) => boolean;
 }
 
 let tray: Tray | null = null;
@@ -71,10 +72,15 @@ function buildMenu(): Menu {
         type: 'checkbox',
         checked: p.open === true,
         click: () => {
-            // If we already own a window for this pane, showing/hiding it is a
-            // main-process job and instant. If we don't, only the renderer can
-            // decide what opening it means (it might belong in the dock), so ask.
-            if (actions?.hasWindow(p.id)) { actions.toggleWindow(p.id); return; }
+            // Let toggleWindow() be the authority, rather than asking "do we have a
+            // window?" and then acting on the answer. Windows are destroyed
+            // asynchronously, so between the question and the act the answer can go
+            // stale — and the click would land on nothing and silently do nothing.
+            //
+            // If it toggled, we're done. If it didn't, we never had that window (or
+            // just lost it), and only the renderer can decide what opening the pane
+            // means — it might belong in the dock, and its element lives there.
+            if (actions?.toggleWindow(p.id)) return;
             const win = actions?.getMainWindow() ?? null;
             if (win && !win.isDestroyed()) win.webContents.send(IPC_PANE_EVENT_TOGGLE, { paneId: p.id });
         },

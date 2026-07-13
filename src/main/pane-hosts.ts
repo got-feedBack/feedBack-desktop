@@ -269,11 +269,6 @@ export function hideAllPaneWindows(): void {
     refreshTray();
 }
 
-export function hasPaneWindow(paneId: string): boolean {
-    const win = windows.get(paneId);
-    return !!win && !win.isDestroyed();
-}
-
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
 export function initPaneHosts(deps: { getMainWindow: () => BrowserWindow | null }): void {

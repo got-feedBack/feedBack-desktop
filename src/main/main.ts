@@ -128,7 +128,7 @@ import { installAppMenu } from './app-menu';
 import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
 import {
     initPaneHosts, closeAllPanes, adoptPaneWindow, paneIdFromFrameName,
-    togglePaneWindow, showAllPaneWindows, hideAllPaneWindows, hasPaneWindow,
+    togglePaneWindow, showAllPaneWindows, hideAllPaneWindows,
 } from './pane-hosts';
 import { initTray, destroyTray } from './pane-tray';
 
@@ -1199,7 +1199,6 @@ async function startup(): Promise<void> {
         toggleWindow: togglePaneWindow,
         showAll: showAllPaneWindows,
         hideAll: hideAllPaneWindows,
-        hasWindow: hasPaneWindow,
     });
 
     // Install our application menu (replaces Electron's default so View →
