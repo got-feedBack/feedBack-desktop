@@ -1,6 +1,7 @@
 #pragma once
 #include "SourceChain.h"
 #include "GainSanitize.h"
+#include "engine/PackedStereoRing.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -276,8 +277,8 @@ public:
         {
             // Drop buffered audio on disable so a later re-enable starts fresh
             // instead of playing a stale tail. Consumer tolerates the jump.
-            rendererBusReadIndex.store(
-                rendererBusWriteIndex.load(std::memory_order_acquire),
+            rendererBusRing.readIndex.store(
+                rendererBusRing.writeIndex.load(std::memory_order_acquire),
                 std::memory_order_release);
             rendererBusPrimed.store(false, std::memory_order_relaxed);
         }
@@ -382,7 +383,7 @@ private:
     SourceChain& source0() { return *sources[0]; }
     const SourceChain& source0() const { return *sources[0]; }
     // Input-device callback. In duplex it writes outputData directly; in split
-    // it pushes processed stereo into outputPendingRing for OutputCallback.
+    // it pushes processed stereo into outputRing for OutputCallback.
     void audioDeviceIOCallbackWithContext(const float* const* inputData,
                                           int numInputChannels,
                                           float* const* outputData,
@@ -402,7 +403,7 @@ private:
     // backingTransport && backingPlaying.
     int renderBackingBlockLocked(int numSamples);
 
-    // Split-mode only: drains outputPendingRing, mixes backing, writes to device.
+    // Split-mode only: drains outputRing, mixes backing, writes to device.
     void audioOutputCallback(const float* const* inputData,
                              int numInputChannels,
                              float* const* outputData,
@@ -560,43 +561,16 @@ private:
     // scratch now live on SourceChain — one set per input source. See
     // SourceChain.h for the full lock-free / power-of-two / cold-start rationale.
 
-    // Split-mode SPSC ring (unused in duplex). Each slot packs one stereo frame
-    // (L+R floats) into a single 64-bit atomic so the consumer reads both
-    // channels in one indivisible load — without packing, the producer's two
-    // separate atomic stores could interleave with the consumer's two loads
-    // during a drop-oldest wrap, surfacing as L_new+R_old (or vice versa)
-    // sample tears. ~85 ms @ 48 kHz — absorbs clock drift over typical sessions.
+    // Split-mode SPSC ring (unused in duplex). Packed-LR single-atomic frames
+    // — see engine/PackedStereoRing.h for the tear/lock-free rationale (moved
+    // there in TLC phase 1). ~85 ms @ 48 kHz — absorbs clock drift over
+    // typical sessions.
     static constexpr int kOutputRingFrames = 4096;
-    std::array<std::atomic<uint64_t>, kOutputRingFrames> outputPendingRing{};
-    static_assert((kOutputRingFrames & (kOutputRingFrames - 1)) == 0,
-                  "kOutputRingFrames must be a power of two for mask wraparound");
-    // RT-thread reads + writes touch these slots, so a lock-based fallback
-    // would risk priority inversion + audible dropouts. On the platforms we
-    // ship (x86_64 + arm64 across Linux/macOS/Windows) atomic<uint64_t> is
-    // always lock-free; this assert turns a regression into a build error
-    // instead of a silent latency degradation if a future platform port
-    // breaks the assumption.
-    static_assert(std::atomic<uint64_t>::is_always_lock_free,
-                  "outputPendingRing requires lock-free atomic<uint64_t> for RT safety");
-    static_assert(sizeof(float) == 4,
-                  "outputPendingRing pack/unpack assumes 32-bit float");
-
-    // Pack/unpack helpers — std::bit_cast (C++20) is constexpr + alias-safe.
-    static inline uint64_t packLR(float l, float r) noexcept
-    {
-        const uint32_t li = std::bit_cast<uint32_t>(l);
-        const uint32_t ri = std::bit_cast<uint32_t>(r);
-        return (static_cast<uint64_t>(ri) << 32) | static_cast<uint64_t>(li);
-    }
-    static inline void unpackLR(uint64_t v, float& l, float& r) noexcept
-    {
-        l = std::bit_cast<float>(static_cast<uint32_t>(v & 0xFFFFFFFFu));
-        r = std::bit_cast<float>(static_cast<uint32_t>(v >> 32));
-    }
+    slopsmith::PackedStereoRing<kOutputRingFrames> outputRing;
 
     // ── Renderer-audio bus ring (see setRendererBus/pushRendererAudio) ───────
-    // Same packed-LR SPSC design as outputPendingRing. Sized generously
-    // (~1.5 s @ 48 kHz — vs outputPendingRing's 85 ms) because the producer is
+    // Same packed-LR SPSC design as outputRing. Sized generously
+    // (~1.5 s @ 48 kHz — vs outputRing's 85 ms) because the producer is
     // an IPC thread with scheduling jitter, not another audio callback; the
     // consumer trims steady-state fill via the drift clamp in the mix step.
     static constexpr int kRendererBusFrames = 65536;
@@ -608,9 +582,7 @@ private:
     // stall dumped a backlog — trim to the prime target, don't play the tail.
     static constexpr int kRendererBusPrimeFrames   = 512;
     static constexpr int kRendererBusMaxFillFrames = 4096;
-    std::array<std::atomic<uint64_t>, kRendererBusFrames> rendererBusRing{};
-    std::atomic<uint64_t> rendererBusWriteIndex{0};
-    std::atomic<uint64_t> rendererBusReadIndex{0};
+    slopsmith::PackedStereoRing<kRendererBusFrames> rendererBusRing;
     std::atomic<uint64_t> rendererBusPushedFrames{0};
     std::atomic<uint64_t> rendererBusConsumedFrames{0};
     std::atomic<uint64_t> rendererBusUnderflowCount{0};
@@ -637,8 +609,6 @@ private:
     // in about-to-start next to the stream scratches (same no-realloc rule).
     juce::AudioBuffer<float> rendererBusPullScratch;
 
-    std::atomic<uint64_t> outputRingWriteIndex{0};
-    std::atomic<uint64_t> outputRingReadIndex{0};
     std::atomic<uint64_t> outputUnderflowCount{0};
     std::atomic<uint64_t> inputOverflowCount{0};
 
@@ -687,9 +657,7 @@ private:
     {
         juce::AudioDeviceManager manager;
         InputSlotCallback callback;
-        std::array<std::atomic<uint64_t>, kOutputRingFrames> ring{};
-        std::atomic<uint64_t> writeIndex{0};
-        std::atomic<uint64_t> readIndex{0};
+        slopsmith::PackedStereoRing<kOutputRingFrames> ring;
         std::atomic<uint64_t> overflowCount{0};
         std::atomic<bool> active{false};      // a device is bound + running
         std::atomic<double> sampleRate{48000.0};
@@ -733,10 +701,6 @@ private:
     int mixSourcesForDevice(int deviceKey, const float* const* inputData, int numInputChannels,
                             juce::AudioBuffer<float>& mixBuf, juce::AudioBuffer<float>& monitorScratch,
                             int effectiveOutputChannels, int numSamples);
-    // Pack a stereo block into a packed-uint64 SPSC ring (producer side).
-    void packStereoIntoRing(const juce::AudioBuffer<float>& buf, int numSamples,
-                            std::array<std::atomic<uint64_t>, kOutputRingFrames>& ring,
-                            std::atomic<uint64_t>& writeIndex);
 
     // ── Streamer mix output sink (PR1) ───────────────────────────────────────
     // A second OUTPUT AudioDeviceManager on its OWN clock that drains a dedicated
@@ -761,9 +725,7 @@ private:
     struct StreamSink
     {
         StreamSinkCallback callback;
-        std::array<std::atomic<uint64_t>, kOutputRingFrames> ring{};
-        std::atomic<uint64_t> writeIndex{0};
-        std::atomic<uint64_t> readIndex{0};
+        slopsmith::PackedStereoRing<kOutputRingFrames> ring;
         std::atomic<uint64_t> underflowCount{0};
         std::atomic<uint64_t> overflowCount{0};
         std::atomic<bool> active{false};

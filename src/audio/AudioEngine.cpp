@@ -458,8 +458,8 @@ AudioEngine::DeviceMetrics AudioEngine::getDeviceMetrics() const
         // (w - r) larger than capacity. Clamp uint64 → int via the
         // capacity ceiling so the consumer-facing field never overflows
         // or goes negative.
-        const uint64_t w = outputRingWriteIndex.load(std::memory_order_acquire);
-        const uint64_t r = outputRingReadIndex.load(std::memory_order_acquire);
+        const uint64_t w = outputRing.writeIndex.load(std::memory_order_acquire);
+        const uint64_t r = outputRing.readIndex.load(std::memory_order_acquire);
         const uint64_t fill = (w >= r) ? (w - r) : 0;
         m.outputRingFillFrames = (int) std::min(fill, (uint64_t) kOutputRingFrames);
     }
@@ -1157,12 +1157,9 @@ AudioEngine::DeviceConfigResult AudioEngine::applySplitSetup(const DeviceConfig&
     fprintf(stderr, "[AudioEngine] Split mode configured: inSr=%.0f inBs=%d outSr=%.0f outBs=%d\n",
             inSr, inBs, outSr, outBs);
 
-    outputRingWriteIndex.store(0, std::memory_order_relaxed);
-    outputRingReadIndex.store(0, std::memory_order_relaxed);
+    outputRing.reset();
     outputUnderflowCount.store(0, std::memory_order_relaxed);
     inputOverflowCount.store(0, std::memory_order_relaxed);
-    for (auto& slot : outputPendingRing)
-        slot.store(0u, std::memory_order_relaxed);
 
     source0().prepareMonitorChain(inSr, inBs);
 
@@ -1184,10 +1181,7 @@ void AudioEngine::teardownSplitMode()
     try { outputDeviceManager.closeAudioDevice(); }
     catch (...) { fprintf(stderr, "[AudioEngine] teardownSplitMode: output close threw\n"); }
 
-    outputRingWriteIndex.store(0, std::memory_order_relaxed);
-    outputRingReadIndex.store(0, std::memory_order_relaxed);
-    for (auto& slot : outputPendingRing)
-        slot.store(0u, std::memory_order_relaxed);
+    outputRing.reset();
 }
 
 // ── Audio Control ─────────────────────────────────────────────────────────────
@@ -1894,8 +1888,7 @@ void AudioEngine::audioDeviceStopped()
         // (an extra-device callback could still be mid-block).
         reclaimPendingReleases();
     }
-    outputRingWriteIndex.store(0, std::memory_order_relaxed);
-    outputRingReadIndex.store(0, std::memory_order_relaxed);
+    outputRing.resetIndices();
     currentBackingLevel.store(0.0f);
 
     // Note on split-mode lifecycle: we deliberately do NOT detach the
@@ -1904,7 +1897,7 @@ void AudioEngine::audioDeviceStopped()
     // doesn't re-add the output callback, so detaching would break
     // automatic recovery (output stays silent until a manual reconfigure).
     // While input is down, the guitar/DSP side of the output goes silent
-    // (no producer feeding outputPendingRing, so the consumer's underflow
+    // (no producer feeding outputRing, so the consumer's underflow
     // branch zero-fills), but the backing track keeps playing — the output
     // callback mixes backingTransport independently of ring state. That's
     // intentional UX: a user unplugging their interface mid-song doesn't
@@ -2061,7 +2054,8 @@ void AudioEngine::composeAndPushStreamMix(const juce::AudioBuffer<float>& guitar
                                   streamMixScratch.getMagnitude(1, 0, numSamples));
     streamSinkLevel.store(peak, std::memory_order_relaxed);
 
-    packStereoIntoRing(streamMixScratch, numSamples, streamSink.ring, streamSink.writeIndex);
+    streamSink.ring.push(streamMixScratch.getReadPointer(0),
+                         streamMixScratch.getReadPointer(1), numSamples);
 }
 
 void AudioEngine::streamSinkCallback(float* const* outputData, int numOutputChannels, int numSamples)
@@ -2071,35 +2065,29 @@ void AudioEngine::streamSinkCallback(float* const* outputData, int numOutputChan
     juce::AudioBuffer<float> buffer(outputData, numOutputChannels, numSamples);
     buffer.clear();
 
-    constexpr uint64_t kMask = (uint64_t) kOutputRingFrames - 1;
-    constexpr uint64_t kCap  = (uint64_t) kOutputRingFrames;
     const int scratchCap = (int) streamSink.pullScratchL.size();
     const int outSamples = juce::jmin(numSamples, scratchCap);
 
-    uint64_t r = streamSink.readIndex.load(std::memory_order_relaxed);
-    const uint64_t w = streamSink.writeIndex.load(std::memory_order_acquire);
-    if (w < r) { r = w; streamSink.readIndex.store(r, std::memory_order_relaxed); }
-    if ((w - r) > kCap)
-    {
-        r = w - kCap;
-        streamSink.readIndex.store(r, std::memory_order_relaxed);
+    auto& ring = streamSink.ring;
+    uint64_t r = ring.readIndex.load(std::memory_order_relaxed);
+    const uint64_t w = ring.writeIndex.load(std::memory_order_acquire);
+    ring.resyncIfIndicesReset(r, w);
+    if (ring.catchUpIfLapped(r, w))
         streamSink.overflowCount.fetch_add(1, std::memory_order_relaxed);
-    }
     const uint64_t available   = w - r;
     const int      pullCount   = juce::jmin(outSamples, (int) available);
     const int      consumeCount = juce::jmin(numSamples, (int) available);
     const int      copyChannels = juce::jmin(numOutputChannels, 2);
     for (int i = 0; i < pullCount; ++i)
     {
-        const uint64_t slot = (r + (uint64_t) i) & kMask;
         float l, rr;
-        unpackLR(streamSink.ring[(size_t) slot].load(std::memory_order_relaxed), l, rr);
+        ring.readFrame(r + (uint64_t) i, l, rr);
         buffer.setSample(0, i, l);
         if (copyChannels > 1) buffer.setSample(1, i, rr);
     }
     if (pullCount < outSamples)
         streamSink.underflowCount.fetch_add(1, std::memory_order_relaxed);
-    streamSink.readIndex.store(r + (uint64_t) consumeCount, std::memory_order_release);
+    ring.commitRead(r + (uint64_t) consumeCount);
 }
 
 void AudioEngine::streamSinkAboutToStart(juce::AudioIODevice* device)
@@ -2113,11 +2101,9 @@ void AudioEngine::streamSinkAboutToStart(juce::AudioIODevice* device)
     const int cap = juce::jmax(bs, 2048);
     if ((int) streamSink.pullScratchL.size() < cap) streamSink.pullScratchL.assign((size_t) cap, 0.0f);
     if ((int) streamSink.pullScratchR.size() < cap) streamSink.pullScratchR.assign((size_t) cap, 0.0f);
-    streamSink.writeIndex.store(0, std::memory_order_relaxed);
-    streamSink.readIndex.store(0, std::memory_order_relaxed);
+    streamSink.ring.reset();
     streamSink.underflowCount.store(0, std::memory_order_relaxed);
     streamSink.overflowCount.store(0, std::memory_order_relaxed);
-    for (auto& v : streamSink.ring) v.store(0, std::memory_order_relaxed);
 }
 
 void AudioEngine::streamSinkStopped()
@@ -2295,7 +2281,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     const bool duplex = duplexMode.load(std::memory_order_relaxed);
 
     // Duplex writes outputData directly. Split runs DSP into a private 2-channel
-    // scratch and pushes the result to outputPendingRing for OutputCallback.
+    // scratch and pushes the result to outputRing for OutputCallback.
     juce::AudioBuffer<float> buffer;
     if (duplex)
     {
@@ -2419,7 +2405,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
         // Split: push processed stereo (pre-backing, pre-output-gain) into the
         // primary ring. OutputCallback adds backing + output gain on its own clock
         // and sums every extra-device ring alongside this one.
-        packStereoIntoRing(buffer, numSamples, outputPendingRing, outputRingWriteIndex);
+        outputRing.push(buffer.getReadPointer(0), buffer.getReadPointer(1), numSamples);
     }
 
     // Body done — this callback is no longer processing a source. Pairs with
@@ -2483,28 +2469,6 @@ int AudioEngine::mixSourcesForDevice(int deviceKey, const float* const* inputDat
     return activeCount;
 }
 
-void AudioEngine::packStereoIntoRing(const juce::AudioBuffer<float>& buf, int numSamples,
-                                     std::array<std::atomic<uint64_t>, kOutputRingFrames>& ring,
-                                     std::atomic<uint64_t>& writeIndex)
-{
-    // Strict SPSC: the producer (one device callback) only ever writes writeIndex;
-    // the consumer (audioOutputCallback) is the sole writer of the paired
-    // readIndex. Drop-oldest = letting writeIndex lap the buffer; the consumer
-    // advances readIndex when it observes (w - r) > cap. The single packed store
-    // prevents an L/R tear when the producer wraps mid-callback (relaxed because
-    // ordering is established by the release on writeIndex below).
-    constexpr uint64_t kMask = (uint64_t) kOutputRingFrames - 1;
-    const uint64_t w = writeIndex.load(std::memory_order_relaxed);
-    const float* L = buf.getReadPointer(0);
-    const float* R = buf.getReadPointer(1);
-    for (int i = 0; i < numSamples; ++i)
-    {
-        const uint64_t slot = (w + (uint64_t) i) & kMask;
-        ring[slot].store(packLR(L[i], R[i]), std::memory_order_relaxed);
-    }
-    writeIndex.store(w + (uint64_t) numSamples, std::memory_order_release);
-}
-
 void AudioEngine::extraInputCallback(int slot, const float* const* inputData, int numInputChannels, int numSamples)
 {
     if (slot < 0 || slot >= kMaxExtraInputDevices) return;
@@ -2521,7 +2485,7 @@ void AudioEngine::extraInputCallback(int slot, const float* const* inputData, in
     juce::AudioBuffer<float> mix;
     mix.setDataToReferTo(s.fanScratch.getArrayOfWritePointers(), 2, numSamples);
     mixSourcesForDevice(s.deviceKey, inputData, numInputChannels, mix, s.monitorScratch, 2, numSamples);
-    packStereoIntoRing(mix, numSamples, s.ring, s.writeIndex);
+    s.ring.push(mix.getReadPointer(0), mix.getReadPointer(1), numSamples);
 
     callbacksInFlight[(size_t) s.deviceKey].fetch_sub(1, std::memory_order_acq_rel);
 }
@@ -2547,9 +2511,7 @@ void AudioEngine::extraInputAboutToStart(int slot, juce::AudioIODevice* device)
     s.monitorScratch.setSize(2, cap, false, false, true);
     s.fanScratch.clear();
     s.monitorScratch.clear();
-    s.writeIndex.store(0, std::memory_order_relaxed);
-    s.readIndex.store(0, std::memory_order_relaxed);
-    for (auto& v : s.ring) v.store(0, std::memory_order_relaxed);
+    s.ring.reset();
 
     // Capture-latency correction: the renderer's playhead is aligned to the PRIMARY
     // device's input latency, but this extra device captures with a different
@@ -2617,8 +2579,7 @@ void AudioEngine::extraInputStopped(int slot)
         // the next add/remove.
         reclaimPendingReleases();
     }
-    s.writeIndex.store(0, std::memory_order_relaxed);
-    s.readIndex.store(0, std::memory_order_relaxed);
+    s.ring.resetIndices();
 }
 
 int AudioEngine::activeExtraInputCount() const
@@ -2905,9 +2866,6 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
     if (numOutputChannels <= 0)
         return;
 
-    constexpr uint64_t kMask = (uint64_t) kOutputRingFrames - 1;
-    constexpr uint64_t kCap  = (uint64_t) kOutputRingFrames;
-
     if ((int) outputPullScratchL.size() < numSamples && audiodiag::firstN(audiodiag::outputOversized))
         fprintf(stderr, "[diag] output callback OVERSIZED block: numSamples=%d > scratch=%d\n",
                 numSamples, (int) outputPullScratchL.size());
@@ -2919,27 +2877,15 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
     const int scratchCap = (int) outputPullScratchL.size();
     const int outSamples = juce::jmin(numSamples, scratchCap);
 
-    uint64_t r = outputRingReadIndex.load(std::memory_order_relaxed);
-    const uint64_t w = outputRingWriteIndex.load(std::memory_order_acquire);
+    uint64_t r = outputRing.readIndex.load(std::memory_order_relaxed);
+    const uint64_t w = outputRing.writeIndex.load(std::memory_order_acquire);
 
-    // If audioDeviceStopped() raced between our two loads and reset both
-    // indices to 0, we can observe w < r. Treat that as an empty ring
-    // and resync — without this, the unsigned (w - r) wraps into a huge
-    // positive value and falls into the catch-up branch reading stale slots.
-    if (w < r)
-    {
-        r = w;
-        outputRingReadIndex.store(r, std::memory_order_relaxed);
-    }
-
-    // Catch up if the producer has lapped (drop-oldest is achieved via this
-    // single-writer consumer-side advance, not a producer-side write to r).
-    if ((w - r) > kCap)
-    {
-        r = w - kCap;
-        outputRingReadIndex.store(r, std::memory_order_relaxed);
+    // Resync if audioDeviceStopped() raced between our two loads and reset
+    // the indices; catch up (drop-oldest) if the producer lapped — both moves
+    // live on PackedStereoRing now, same semantics as before.
+    outputRing.resyncIfIndicesReset(r, w);
+    if (outputRing.catchUpIfLapped(r, w))
         inputOverflowCount.fetch_add(1, std::memory_order_relaxed);
-    }
 
     const uint64_t available = w - r;
     const int      pullCount = juce::jmin(outSamples, (int) available);
@@ -2954,11 +2900,10 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
 
     for (int i = 0; i < pullCount; ++i)
     {
-        const uint64_t slot = (r + (uint64_t) i) & kMask;
         // Single atomic load → atomic unpack of both channels (matches the
         // producer's packed store) so L and R always belong to the same frame.
         float l, rr;
-        unpackLR(outputPendingRing[slot].load(std::memory_order_relaxed), l, rr);
+        outputRing.readFrame(r + (uint64_t) i, l, rr);
         outputPullScratchL[(size_t) i] = l;
         outputPullScratchR[(size_t) i] = rr;
     }
@@ -2971,7 +2916,7 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
         }
         outputUnderflowCount.fetch_add(1, std::memory_order_relaxed);
     }
-    outputRingReadIndex.store(r + (uint64_t) consumeCount, std::memory_order_release);
+    outputRing.commitRead(r + (uint64_t) consumeCount);
 
     buffer.clear();
     const int copyChannels = juce::jmin(numOutputChannels, 2);
@@ -2989,27 +2934,22 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
     for (auto& s : extraInputs)
     {
         if (! s.active.load(std::memory_order_acquire)) continue;
-        uint64_t er = s.readIndex.load(std::memory_order_relaxed);
-        const uint64_t ew = s.writeIndex.load(std::memory_order_acquire);
-        if (ew < er) { er = ew; s.readIndex.store(er, std::memory_order_relaxed); }
-        if ((ew - er) > kCap)
-        {
-            er = ew - kCap;
-            s.readIndex.store(er, std::memory_order_relaxed);
+        uint64_t er = s.ring.readIndex.load(std::memory_order_relaxed);
+        const uint64_t ew = s.ring.writeIndex.load(std::memory_order_acquire);
+        s.ring.resyncIfIndicesReset(er, ew);
+        if (s.ring.catchUpIfLapped(er, ew))
             s.overflowCount.fetch_add(1, std::memory_order_relaxed);
-        }
         const uint64_t eAvail   = ew - er;
         const int      ePull    = juce::jmin(outSamples, (int) eAvail);
         const int      eConsume = juce::jmin(numSamples,  (int) eAvail);
         for (int i = 0; i < ePull; ++i)
         {
-            const uint64_t slot = (er + (uint64_t) i) & kMask;
             float l, rr;
-            unpackLR(s.ring[(size_t) slot].load(std::memory_order_relaxed), l, rr);
+            s.ring.readFrame(er + (uint64_t) i, l, rr);
             buffer.addSample(0, i, l);
             if (copyChannels > 1) buffer.addSample(1, i, rr);
         }
-        s.readIndex.store(er + (uint64_t) eConsume, std::memory_order_release);
+        s.ring.commitRead(er + (uint64_t) eConsume);
     }
 
     // Stream sink (producer, split clock): snapshot the full guitar mix (primary
@@ -3100,8 +3040,7 @@ bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, doub
     if (deviceRate <= 0.0) return false;
     if (!(sourceRate > 0.0)) sourceRate = deviceRate;
 
-    constexpr uint64_t kMask = kRendererBusFrames - 1;
-    uint64_t w = rendererBusWriteIndex.load(std::memory_order_relaxed);
+    uint64_t w = rendererBusRing.beginWrite();
 
     // Linear resample source→device rate on this (IPC) thread. `pos` is the
     // fractional read position into the incoming chunk; index -1 refers to the
@@ -3121,9 +3060,7 @@ bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, doub
         const float r0 = (i0 < 0) ? rendererBusPrevR : interleavedLR[(size_t) i0 * 2 + 1];
         const float l1 = interleavedLR[((size_t) i0 + 1) * 2];
         const float r1 = interleavedLR[((size_t) i0 + 1) * 2 + 1];
-        rendererBusRing[(size_t) (w & kMask)].store(
-            packLR(l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac),
-            std::memory_order_relaxed);
+        rendererBusRing.stageFrame(w, l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac);
         ++w;
         ++written;
         pos += step;
@@ -3135,7 +3072,7 @@ bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, doub
     // Publish. Overflow (producer lapping the consumer) is handled consumer-
     // side with drop-oldest — same contract as the extra-input rings — so only
     // the consumer ever moves readIndex.
-    rendererBusWriteIndex.store(w, std::memory_order_release);
+    rendererBusRing.publish(w);
     rendererBusPushedFrames.fetch_add(written, std::memory_order_relaxed);
     return true;
 }
@@ -3146,9 +3083,8 @@ int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
     // Cold start before about-to-start sized the scratch — skip, never alloc
     // on the RT thread (same rule as the stream scratches).
     if (dest.getNumSamples() < numSamples || dest.getNumChannels() < 2) return 0;
-    constexpr uint64_t kMask = kRendererBusFrames - 1;
-    const uint64_t w = rendererBusWriteIndex.load(std::memory_order_acquire);
-    uint64_t r = rendererBusReadIndex.load(std::memory_order_relaxed);
+    const uint64_t w = rendererBusRing.writeIndex.load(std::memory_order_acquire);
+    uint64_t r = rendererBusRing.readIndex.load(std::memory_order_relaxed);
     if (w - r > (uint64_t) kRendererBusFrames)
     {
         // Producer lapped us — drop-oldest to the newest full ring.
@@ -3176,7 +3112,7 @@ int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
     {
         if (avail < (uint64_t) kRendererBusPrimeFrames)
         {
-            rendererBusReadIndex.store(r, std::memory_order_release);
+            rendererBusRing.commitRead(r);
             return 0;
         }
         rendererBusPrimed = true;
@@ -3187,7 +3123,7 @@ int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
         // drop what's buffered, and go back to priming.
         rendererBusPrimed = false;
         rendererBusUnderflowCount.fetch_add(1, std::memory_order_relaxed);
-        rendererBusReadIndex.store(w, std::memory_order_release);
+        rendererBusRing.commitRead(w);
         return 0;
     }
 
@@ -3198,11 +3134,11 @@ int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
     for (int i = 0; i < pull; ++i)
     {
         float l, rr;
-        unpackLR(rendererBusRing[(size_t) ((r + (uint64_t) i) & kMask)].load(std::memory_order_relaxed), l, rr);
+        rendererBusRing.readFrame(r + (uint64_t) i, l, rr);
         dl[i] = l * g;
         dr[i] = rr * g;
     }
-    rendererBusReadIndex.store(r + (uint64_t) pull, std::memory_order_release);
+    rendererBusRing.commitRead(r + (uint64_t) pull);
     rendererBusConsumedFrames.fetch_add((uint64_t) pull, std::memory_order_relaxed);
     return pull;
 }
@@ -3214,8 +3150,8 @@ AudioEngine::RendererBusMetrics AudioEngine::getRendererBusMetrics() const
     m.consumedFrames = rendererBusConsumedFrames.load(std::memory_order_relaxed);
     m.underflowCount = rendererBusUnderflowCount.load(std::memory_order_relaxed);
     m.overflowCount  = rendererBusOverflowCount.load(std::memory_order_relaxed);
-    const uint64_t w = rendererBusWriteIndex.load(std::memory_order_acquire);
-    const uint64_t r = rendererBusReadIndex.load(std::memory_order_acquire);
+    const uint64_t w = rendererBusRing.writeIndex.load(std::memory_order_acquire);
+    const uint64_t r = rendererBusRing.readIndex.load(std::memory_order_acquire);
     m.fillFrames = (int) juce::jmin(w - r, (uint64_t) kRendererBusFrames);
     m.capacityFrames = kRendererBusFrames;
     m.enabled = rendererBusEnabled.load(std::memory_order_relaxed);
