@@ -13,6 +13,7 @@ set(AUDIO_SOURCES
     engine/ExtraInputs.cpp
     addon/AddonContext.cpp
     addon/ChainOps.cpp
+    addon/EditorWindows.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp
