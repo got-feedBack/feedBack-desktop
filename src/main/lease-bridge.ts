@@ -43,10 +43,6 @@ export type LeaseBridge = {
     // Hooks for the legacy raw channels (§6.8 migration semantics):
     onUserStartAudio(): void;
     onUserStopAudio(): void;
-    // §8.3 user-stop latch: while set, legacy raw startAudio (nam_tone's
-    // keep-alive watchdog, any unmigrated caller) must be suppressed — only
-    // an explicit user start clears it.
-    isUserStopLatched(): boolean;
     // true = swallow the raw disarm because a demand holder still needs
     // detection armed (the 6.3 "last disarmer kills a concurrent consumer" fix).
     shouldIgnoreRawDetectionDisarm(): boolean;
@@ -66,14 +62,9 @@ export function initLeaseBridge(getAudio: () => AudioModule, options: { broadcas
     // "that telemetry IS the migration progress dashboard").
     const legacyCallsLogged = new Set<string>();
     // Whether the engine is running because capture demand started it (as
-    // opposed to a user start). Demand-started engines stop when the demand
-    // drains; user-started engines only stop on user stop (§8.3).
+    // opposed to a user raw start). Demand-started engines stop when the
+    // demand drains; user-started engines only stop on user raw stop (§8.3).
     let engineStartedByDemand = false;
-    // User-stop latch (§8.3): the device screen's explicit stop wins over
-    // EVERYTHING — legacy raw starts and fresh capture demands are held off
-    // until the user starts again. Found in the field: nam_tone's 1.5 s
-    // keep-alive watchdog restarted the engine right after a user stop.
-    let userStopLatch = false;
 
     function sanitizeTag(tag: unknown): string | null {
         if (typeof tag !== 'string' || !TAG_RE.test(tag)) return null;
@@ -142,9 +133,6 @@ export function initLeaseBridge(getAudio: () => AudioModule, options: { broadcas
         if (!audio) return;
         if (scope === 'capture') {
             try {
-                // A demand arriving while the user has stopped audio does not
-                // restart the engine — it waits for the user start (§8.3).
-                if (userStopLatch && active) return;
                 const running = typeof audio.isAudioRunning === 'function' && audio.isAudioRunning() === true;
                 if (active && !running) {
                     audio.startAudio?.();
@@ -209,13 +197,7 @@ export function initLeaseBridge(getAudio: () => AudioModule, options: { broadcas
             const holderId = deriveHolder(sender, tag);
             trackSender(sender, holderId);
             registry.tryRestore(identityKey(sender, tag), holderId);
-            const ok = registry.acquireDemand(String(scope), holderId);
-            // A demand born during a user stop starts suspended, so the user
-            // start resumes it like every pre-existing demand (§8.3).
-            if (ok && userStopLatch && String(scope).startsWith('capture')) {
-                registry.suspendDemands(String(scope));
-            }
-            return ok;
+            return registry.acquireDemand(String(scope), holderId);
         },
 
         releaseDemand(sender, scope, tag) {
@@ -227,26 +209,19 @@ export function initLeaseBridge(getAudio: () => AudioModule, options: { broadcas
         },
 
         onUserStartAudio() {
-            // User start is the only thing that clears the stop latch and
-            // resumes suspended demands (§8.3).
-            userStopLatch = false;
+            // User raw start is the only thing that resumes suspended
+            // demands (§8.3).
             engineStartedByDemand = false;
             registry.resumeDemands('capture');
             registry.resumeDemands('detection:');
         },
 
         onUserStopAudio() {
-            // User stop always wins: the latch holds off legacy raw starts
-            // and fresh demands; existing demands suspend (registration
-            // kept), holders learn via demand-suspended events (§8.3).
-            userStopLatch = true;
+            // User raw stop always wins: demands suspend (registration kept),
+            // holders learn via demand-suspended events (§8.3).
             engineStartedByDemand = false;
             registry.suspendDemands('capture');
             registry.suspendDemands('detection:');
-        },
-
-        isUserStopLatched() {
-            return userStopLatch;
         },
 
         shouldIgnoreRawDetectionDisarm() {

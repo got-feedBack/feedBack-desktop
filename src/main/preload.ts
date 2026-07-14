@@ -247,12 +247,6 @@ const feedBackDesktopApi = {
         // Audio control
         startAudio: () => ipcRenderer.invoke('audio:startAudio'),
         stopAudio: () => ipcRenderer.invoke('audio:stopAudio'),
-        // User-authority start/stop (device screen only, §8.3): stop latches
-        // — legacy raw starts and fresh capture demands are held off until
-        // the user starts again; start clears the latch and resumes
-        // suspended demands.
-        userStartAudio: () => ipcRenderer.invoke('audio:userStartAudio'),
-        userStopAudio: () => ipcRenderer.invoke('audio:userStopAudio'),
         isAudioRunning: () => ipcRenderer.invoke('audio:isAudioRunning'),
 
         // Engine-owned mixer (docs/audio-ownership-plan.md §5.1). Tier 1

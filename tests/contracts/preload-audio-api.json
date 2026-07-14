@@ -100,9 +100,7 @@
     "startBacking",
     "stopAudio",
     "stopBacking",
-    "unbindInputDevice",
-    "userStartAudio",
-    "userStopAudio"
+    "unbindInputDevice"
   ],
   "audioEffects": [
     "activateSegment",
