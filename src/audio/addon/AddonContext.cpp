@@ -81,7 +81,7 @@ static void stopJuceMessageThread()
 #endif
 }
 
-void dispatchOnMessageThreadImpl(std::function<void()> func)
+bool dispatchOnMessageThreadImpl(std::function<void()> func)
 {
 #if JUCE_MAC
     // No background message thread on macOS — execute inline on caller thread.
@@ -89,17 +89,38 @@ void dispatchOnMessageThreadImpl(std::function<void()> func)
     // instantiation (which genuinely requires a message thread on macOS) is
     // the one capability we give up until a proper libuv-based pump lands.
     func();
+    return true;
 #else
     // Heap-allocate the WaitableEvent and capture by value so the queued
     // callAsync closure can outlive this stack frame. Without this, a 15 s
     // timeout (rare, but possible during shutdown when the message thread is
     // busy) leaves the lambda running on freed `done` storage — a real UAF.
+    //
+    // Both failure modes are reported to the caller: a refused post means
+    // `func` will NEVER run (message queue already gone); a wait timeout
+    // means it hasn't run YET (it may still run later while the dispatch
+    // loop drains). Lifecycle callers must not proceed as if the work
+    // completed — doShutdown in particular used to unload the addon while
+    // editor teardown / stopAudio / engine destruction were still pending.
     auto done = std::make_shared<juce::WaitableEvent>();
-    juce::MessageManager::callAsync([func = std::move(func), done]() mutable {
-        func();
-        done->signal();
-    });
-    done->wait(15000);
+    const bool posted = juce::MessageManager::callAsync(
+        [func = std::move(func), done]() mutable {
+            func();
+            done->signal();
+        });
+    if (!posted)
+    {
+        fprintf(stderr, "[audio-native] dispatchOnMessageThread: message queue "
+                        "refused the post; dispatched work will not run\n");
+        return false;
+    }
+    if (!done->wait(15000))
+    {
+        fprintf(stderr, "[audio-native] dispatchOnMessageThread: dispatched work "
+                        "did not complete within 15s\n");
+        return false;
+    }
+    return true;
 #endif
 }
 
@@ -152,7 +173,7 @@ void initialize(std::function<void()> uiTeardownHook)
 #endif
 
     // Create engine on the JUCE message thread (or inline on macOS)
-    dispatchOnMessageThread([]() {
+    const bool initialized = dispatchOnMessageThread([]() {
         std::shared_ptr<AudioEngine> liveEngine;
         {
             std::lock_guard<std::mutex> lock(engineMutex);
@@ -172,6 +193,9 @@ void initialize(std::function<void()> uiTeardownHook)
                     types[i].inputDevices.size(),
                     types[i].outputDevices.size());
     });
+    if (!initialized)
+        fprintf(stderr, "[audio-native] initialize: engine creation did not complete "
+                        "on the message thread; audio bindings will no-op until re-init\n");
 }
 
 void doShutdown()
@@ -201,7 +225,7 @@ void doShutdown()
 
     if (juceRunning.load() || snapshotEngine() || snapshotVstHost())
     {
-        dispatchOnMessageThread([]() {
+        const bool toreDown = dispatchOnMessageThread([]() {
             // Editors reference their slot's processor; engine.reset() below
             // frees the whole chain, so destroy the editor windows first (#56).
             if (shutdownUiTeardown) shutdownUiTeardown();
@@ -216,6 +240,20 @@ void doShutdown()
                 vstHost.reset();
             }
         });
+        if (!toreDown)
+        {
+            // Editor teardown / stopAudio / engine destruction have NOT
+            // completed. Do not stop the message thread underneath them: a
+            // timed-out teardown lambda is still queued and can only finish
+            // if the pump keeps running. Leaking the pump thread at process
+            // exit beats unloading the addon mid-destruction (the exact
+            // shutdown UAF this path exists to prevent). The latch stays
+            // set, so a re-entrant shutdown call no-ops.
+            fprintf(stderr, "[audio-native] doShutdown: engine teardown did not "
+                            "complete; leaving message thread running\n");
+            slopsmith::sandbox::uninstallVstCrashAttribution();
+            return;
+        }
     }
 
     stopJuceMessageThread();

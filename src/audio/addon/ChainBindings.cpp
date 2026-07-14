@@ -74,8 +74,25 @@ Napi::Value SetBypass(const Napi::CallbackInfo& info)
 
 Napi::Value ClearChain(const Napi::CallbackInfo& info)
 {
+    // Gate editor opens for the whole teardown+clear window (see the rebuild
+    // barrier in ChainOps.h): without it, an editor opened between the
+    // teardown below and the clear acquiring the mutex would point at a
+    // processor the clear is about to free.
+    slopsmith::addon::beginChainRebuild();
+    struct BarrierRelease {
+        ~BarrierRelease() { slopsmith::addon::endChainRebuild(); }
+    } barrierRelease;
+
     // Tear editors down before their processors are freed just below (#56).
-    closeAllPluginEditorWindows();
+    if (!closeAllPluginEditorWindows())
+    {
+        // Teardown refused/timed out: an editor may still be bound to a chain
+        // processor. Clearing now would free it under the live editor — the
+        // documented UAF. Skip the clear; the caller can retry.
+        fprintf(stderr, "[audio-native] clearChain: editor teardown did not complete; "
+                        "chain left untouched\n");
+        return info.Env().Undefined();
+    }
     if (auto liveEngine = snapshotEngine())
     {
         // Serialized with the async chain workers (deep-read 1). May block

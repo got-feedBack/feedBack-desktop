@@ -44,6 +44,25 @@ uint64_t currentChainGeneration()
     return chainGeneration.load(std::memory_order_acquire);
 }
 
+// ── Rebuild barrier (see ChainOps.h) ────────────────────────────────────────
+
+static std::atomic<int> chainRebuildsPending{0};
+
+void beginChainRebuild()
+{
+    chainRebuildsPending.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void endChainRebuild()
+{
+    chainRebuildsPending.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+bool isChainRebuildPending()
+{
+    return chainRebuildsPending.load(std::memory_order_acquire) > 0;
+}
+
 // ── decodeStateBlob (moved verbatim) ────────────────────
 
 // Decode a state blob that may be in EITHER base64 flavour. JUCE's
@@ -398,6 +417,8 @@ public:
             ProcessorSlot::Type::VST,
             name,
             path);
+        if (slotId_ >= 0)
+            slopsmith::addon::bumpChainGeneration();  // still under chainLock
     }
 
     void OnOK() override
@@ -476,11 +497,22 @@ Napi::Value LoadVST(const Napi::CallbackInfo& info)
     if (processor)
     {
         auto name = processor->getName();
+        // Serialize with the async chain workers (deep-read 1): an unguarded
+        // addProcessor here could land a slot inside a LoadPresetWorker's
+        // clear()+rebuild running on a libuv thread. Deadlock-safe on macOS:
+        // a worker holding this mutex never waits on THIS (Node/main) thread —
+        // loadVstSandboxAware's JUCE_MAC branch is a synchronous load on the
+        // worker itself, and dispatchOnMessageThread runs inline there. Only
+        // the mutation is guarded; the slow plugin load above stays outside
+        // the lock.
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         slotId = liveEngine->getSignalChain().addProcessor(
             std::move(processor),
             ProcessorSlot::Type::VST,
             name,
             juce::String(pluginPath));
+        if (slotId >= 0)
+            slopsmith::addon::bumpChainGeneration();  // still under chainLock
     }
     else
     {
@@ -518,6 +550,8 @@ public:
                 ProcessorSlot::Type::NAM,
                 "NAM: " + name,
                 juce::String(modelPath_));
+            if (slotId_ >= 0)
+                slopsmith::addon::bumpChainGeneration();  // still under chainLock
         }
     }
 
@@ -573,6 +607,8 @@ public:
                     ProcessorSlot::Type::IR,
                     "IR: " + name,
                     juce::String(irPath_));
+            if (slotId_ >= 0)
+                slopsmith::addon::bumpChainGeneration();  // still under chainLock
         }
     }
 
@@ -635,6 +671,8 @@ public:
                 "IR: " + name, juce::String(irPath_));
         if (ok_ && gain_ >= 0.0f)
             liveEngine->getSignalChain().setPostGain(slotId_, gain_);
+        if (ok_)
+            slopsmith::addon::bumpChainGeneration();  // still under chainLock
     }
 
     void OnOK() override { deferred_.Resolve(Napi::Boolean::New(Env(), ok_)); }
@@ -680,6 +718,13 @@ public:
 
     void Execute() override
     {
+        // Release the rebuild barrier LoadPreset() armed before editor
+        // teardown, on every exit path — editors may open again once the
+        // rebuild below has completed (or bailed).
+        struct BarrierRelease {
+            ~BarrierRelease() { slopsmith::addon::endChainRebuild(); }
+        } barrierRelease;
+
         // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
         // workers on the libuv pool must not interleave clear()/addProcessor().
         std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
@@ -841,6 +886,14 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
         return deferred.Promise();
     }
 
+    // Arm the rebuild barrier BEFORE editor teardown: between closeAll…()
+    // returning and the queued worker acquiring chainMutationMutex, nothing
+    // else stops OpenPluginEditor from opening a fresh editor whose processor
+    // the worker is about to free (#56). The barrier gates editor opens for
+    // the whole teardown+rebuild window; the worker releases it on every
+    // Execute() exit path.
+    slopsmith::addon::beginChainRebuild();
+
     // Tear down any open in-process editor windows NOW, on the N-API/main
     // thread, before the AsyncWorker frees the chain's processors on a libuv
     // worker (#56). Doing it here — not inside LoadPresetWorker::Execute — keeps
@@ -848,7 +901,19 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
     // message thread (inline teardown); on Linux/Windows closeAllPluginEditor-
     // Windows() posts to the dedicated JUCE message thread and blocks. Either
     // way editors are destroyed before Execute() clears the chain.
-    closeAllPluginEditorWindows();
+    if (!closeAllPluginEditorWindows())
+    {
+        // Teardown refused or timed out: an editor may still be alive and
+        // bound to a chain processor. Clearing/rebuilding now would free that
+        // processor under the live editor — the documented UAF. Abort the
+        // load instead of proceeding.
+        slopsmith::addon::endChainRebuild();
+        auto obj = Napi::Object::New(env);
+        obj.Set("success", false);
+        obj.Set("error", "editor teardown did not complete; preset load aborted");
+        deferred.Resolve(obj);
+        return deferred.Promise();
+    }
 
     auto json = info[0].As<Napi::String>().Utf8Value();
     auto worker = new LoadPresetWorker(env, deferred, json);

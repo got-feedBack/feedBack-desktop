@@ -8,12 +8,14 @@
 
 #include "AddonContext.h"
 #include "NapiHelpers.h"
+#include "ChainOps.h"
 #include "../Sandbox/SandboxedProcessor.h"
 #include "../Sandbox/CrashAttribution.h"
 
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace slopsmith::addon {
 
@@ -82,13 +84,13 @@ void destroyAllPluginEditorWindowsOnMessageThread()
 //     until the editors are gone. Its 50ms dispatch loop drains this promptly,
 //     so there is no macOS-style stall here. Report a refused post / wait
 //     timeout so a lingering-editor UAF stays diagnosable.
-void closeAllPluginEditorWindows()
+bool closeAllPluginEditorWindows()
 {
     auto* mm = juce::MessageManager::getInstanceWithoutCreating();
     if (mm != nullptr && mm->isThisTheMessageThread())
     {
         destroyAllPluginEditorWindowsOnMessageThread();
-        return;
+        return true;
     }
 
     auto done = std::make_shared<juce::WaitableEvent>();
@@ -100,12 +102,19 @@ void closeAllPluginEditorWindows()
     if (!posted)
     {
         fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: message queue refused the post; "
-                        "editors may briefly outlive their processors\n");
-        return;
+                        "editors may still be alive\n");
+        return false;
     }
     if (!done->wait(15000))
+    {
+        // The queued teardown hasn't run: editors may still hold pointers into
+        // the chain. Callers must NOT free slot processors on a false return —
+        // proceeding here is exactly the #56 use-after-free, just delayed.
         fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: editor teardown did not complete "
-                        "within 15s; proceeding\n");
+                        "within 15s; caller must not free chain processors\n");
+        return false;
+    }
+    return true;
 }
 
 Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
@@ -116,6 +125,22 @@ Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
     if (!liveEngine || !slotIdOpt)
         return Napi::Boolean::New(env, false);
     const int slotId = *slotIdOpt;
+
+    // Rebuild barrier (ChainOps.h): a chain clear/rebuild is between its
+    // editor teardown and the mutation itself — the processor this editor
+    // would bind to is about to be freed (#56). Refuse to open.
+    if (slopsmith::addon::isChainRebuildPending())
+        return Napi::Boolean::New(env, false);
+
+    // Resolve the slot under the chain-mutation mutex: getSlot returns a raw
+    // pointer a concurrent worker's clear()/rebuild would free under us.
+    // try_lock, never a blocking lock — a preset load can hold the mutex for
+    // seconds (VST init) and this is V8's thread; if a mutation is in flight
+    // the slot we'd open is about to be replaced anyway.
+    std::unique_lock<std::mutex> chainLock(
+        slopsmith::addon::chainMutationMutex(), std::try_to_lock);
+    if (!chainLock.owns_lock())
+        return Napi::Boolean::New(env, false);
 
     auto slot = liveEngine->getSignalChain().getSlot(slotId);
     if (!slot || !slot->processor || !slot->processor->hasEditor())
@@ -154,10 +179,22 @@ Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
         // crash between then and now is possible — re-check here.
         if (!sb->isAlive())
             return Napi::Boolean::New(env, false);
+        // Validation is done — release before queueing, so the lambda's own
+        // try_lock on the message thread can't collide with THIS thread still
+        // holding the mutex and drop the open as a false conflict.
+        chainLock.unlock();
         const bool queued = juce::MessageManager::callAsync([slotId]()
         {
             auto liveEngine = snapshotEngine();
             if (!liveEngine) return;
+            // try_lock, NEVER a blocking lock on the message thread: chain
+            // workers holding the mutex block-wait on this very thread
+            // (loadVstSandboxAware's callAsync+wait) — blocking here would
+            // deadlock. Contention means a mutation is rebuilding the slot;
+            // skip the open.
+            std::unique_lock<std::mutex> chainLock(
+                slopsmith::addon::chainMutationMutex(), std::try_to_lock);
+            if (!chainLock.owns_lock()) return;
             if (auto* slot = liveEngine->getSignalChain().getSlot(slotId))
                 if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()))
                     sb->requestOpenEditor();
@@ -173,30 +210,46 @@ Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
     }
 #endif
 
-    // In-process plugin — host-side PluginEditorWindow flow. If a window
-    // already exists for this slot, bring it to front rather than creating
-    // a duplicate.
-    auto it = editorWindows.find(slotId);
-    if (it != editorWindows.end() && it->second)
-    {
-        if (it->second->isVisible())
-        {
-            it->second->toFront(true);
-            return Napi::Boolean::New(env, true);
-        }
-        // Window was hidden/closed, remove stale entry
-        editorWindows.erase(it);
-    }
-
-    // Create editor on the message thread. Capture slotId only — re-resolve
-    // the slot via snapshotEngine() + getSlot(slotId) inside the lambda so a
-    // SignalChain::removeProcessor() between this call returning and the
-    // async firing can't leave us calling createEditorAndMakeActive() on a
-    // dangling juce::AudioProcessor*. Mirrors the sandbox branch's pattern.
+    // In-process plugin — host-side PluginEditorWindow flow. Everything —
+    // including the duplicate-window check — runs on the message thread:
+    // editorWindows is a plain std::map owned by that thread, and reading or
+    // erasing it from this (N-API) thread raced the message-thread inserts/
+    // erases.
+    //
+    // Capture slotId only — re-resolve the slot via snapshotEngine() +
+    // getSlot(slotId) inside the lambda so a SignalChain::removeProcessor()
+    // between this call returning and the async firing can't leave us calling
+    // createEditorAndMakeActive() on a dangling juce::AudioProcessor*.
+    //
+    // Validation is done — release before queueing, so the lambda's own
+    // try_lock on the message thread can't collide with THIS thread still
+    // holding the mutex and drop the open as a false conflict.
+    chainLock.unlock();
     const bool queued = juce::MessageManager::callAsync([slotId]()
     {
+        // If a window already exists for this slot, bring it to front rather
+        // than creating a duplicate.
+        auto it = editorWindows.find(slotId);
+        if (it != editorWindows.end() && it->second)
+        {
+            if (it->second->isVisible())
+            {
+                it->second->toFront(true);
+                return;
+            }
+            // Window was hidden/closed, remove stale entry
+            editorWindows.erase(it);
+        }
+
         auto liveEngine = snapshotEngine();
         if (!liveEngine) return;
+        // try_lock, NEVER a blocking lock on the message thread: chain
+        // workers holding the mutex block-wait on this very thread
+        // (loadVstSandboxAware's callAsync+wait) — blocking here would
+        // deadlock. Contention means the slot is being rebuilt; skip.
+        std::unique_lock<std::mutex> chainLock(
+            slopsmith::addon::chainMutationMutex(), std::try_to_lock);
+        if (!chainLock.owns_lock()) return;
         auto& chain = liveEngine->getSignalChain();
         auto* slot = chain.getSlot(slotId);
         if (!slot || !slot->processor) return;
@@ -259,6 +312,11 @@ Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
                     if (chain.replaceProcessor(slotId, std::move(sandboxed)))
                     {
                         promoted = true;
+                        // A promotion swaps the slot's processor: bump the
+                        // generation (we hold chainMutationMutex via the
+                        // try_lock above) so JS-side chain owners re-sync
+                        // instead of driving the replaced slot blind.
+                        slopsmith::addon::bumpChainGeneration();
                         bool editorOpened = false;
                         if (auto* slot2 = chain.getSlot(slotId))
                             if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot2->processor.get()))
@@ -296,7 +354,14 @@ Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
 
         // In-process editor: non-VST3, editor-less, already-sandboxed, or POSIX
         // (where the in-process editor is safe).
+        //
+        // Re-check the processor: the promotion branch above documents that a
+        // faulted captureVstStateForPromotion() can RELEASE the slot's
+        // processor before returning false — falling through here with a null
+        // processor would crash on createEditorAndMakeActive().
         auto* processor = slot->processor.get();
+        if (processor == nullptr)
+            return;
         auto name = slot->name;
         juce::AudioProcessorEditor* editor = nullptr;
         try {
@@ -324,53 +389,38 @@ Napi::Value ClosePluginEditor(const Napi::CallbackInfo& info)
     if (!slotIdOpt) return Napi::Boolean::New(env, false);
     const int slotId = *slotIdOpt;
 
-    // Sandboxed plugins: route the close to the sandbox child via IPC.
-    // No host-side PluginEditorWindow exists for these.
-    //
-    // Same shape as the open path: dispatch off the N-API thread and
-    // re-resolve the slot inside the lambda. requestCloseEditor()
-    // ultimately writes to the control pipe (writeFrame can block up
-    // to ~5s on a stalled reader), so running it synchronously here
-    // would freeze JS / the renderer UI on a slow sandbox; the
-    // re-resolve guards against slot-removal UAF between the napi call
-    // and the async firing.
-    //
-    // All desktop platforms: route the close to the sandbox child via IPC
-    // (SandboxedProcessor is compiled everywhere now). In-process plugins fall
-    // through to the host-side editor-window teardown below.
-#if defined(SLOPSMITH_AUDIO_ADDON)
-    if (auto liveEngine = snapshotEngine())
+    // One queued lambda handles both the sandbox and in-process paths, for
+    // two reasons:
+    //   - editorWindows is message-thread-owned; the old synchronous
+    //     find() here raced the message-thread inserts/erases.
+    //   - getSlot() from this (N-API) thread dereferenced a slot a chain
+    //     worker could free mid-call; the slot is now resolved inside the
+    //     lambda under a try_lock on the chain-mutation mutex.
+    // requestCloseEditor() ultimately writes to the control pipe (writeFrame
+    // can block up to ~5s on a stalled reader), so dispatching also keeps a
+    // slow sandbox from freezing JS / the renderer UI.
+    const bool queued = juce::MessageManager::callAsync([slotId]()
     {
-        if (auto* slot = liveEngine->getSignalChain().getSlot(slotId))
-        {
-            if (slot->processor
-                && dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()))
-            {
-                const bool queued = juce::MessageManager::callAsync([slotId]()
-                {
-                    auto liveEngine = snapshotEngine();
-                    if (!liveEngine) return;
-                    if (auto* slot = liveEngine->getSignalChain().getSlot(slotId))
-                        if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()))
-                            sb->requestCloseEditor();
-                });
-                return Napi::Boolean::New(env, queued);
-            }
-        }
-    }
-#endif
+        // Host-side window (in-process plugins). Erasing a missing key is a
+        // no-op; sandbox slots never have an entry here.
+        editorWindows.erase(slotId);
 
-    // In-process plugin — tear down the host-side editor window.
-    auto it = editorWindows.find(slotId);
-    if (it != editorWindows.end())
-    {
-        juce::MessageManager::callAsync([slotId]()
-        {
-            editorWindows.erase(slotId);
-        });
-        return Napi::Boolean::New(env, true);
-    }
-    return Napi::Boolean::New(env, false);
+#if defined(SLOPSMITH_AUDIO_ADDON)
+        auto liveEngine = snapshotEngine();
+        if (!liveEngine) return;
+        // try_lock, NEVER a blocking lock on the message thread: chain
+        // workers holding the mutex block-wait on this very thread —
+        // blocking here would deadlock. Contention means the chain is being
+        // rebuilt, which tears editors down anyway.
+        std::unique_lock<std::mutex> chainLock(
+            slopsmith::addon::chainMutationMutex(), std::try_to_lock);
+        if (!chainLock.owns_lock()) return;
+        if (auto* slot = liveEngine->getSignalChain().getSlot(slotId))
+            if (auto* sb = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()))
+                sb->requestCloseEditor();
+#endif
+    });
+    return Napi::Boolean::New(env, queued);
 }
 
 

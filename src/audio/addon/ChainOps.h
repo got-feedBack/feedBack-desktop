@@ -49,6 +49,19 @@ uint64_t currentChainGeneration();
 //   const uint64_t gen = bumpChainGeneration();   // still under the lock
 //   (return gen in the result object)
 
+// ── Rebuild barrier (editor-open gate) ────────────────────────────────────
+// A chain clear/rebuild is a two-step dance: editors are torn down on the
+// message thread FIRST, then the mutation runs (synchronously for ClearChain,
+// on a queued AsyncWorker for LoadPreset). Between those steps the mutation
+// mutex is NOT yet held, so an editor opened in that window would point at a
+// processor the imminent clear is about to free (#56). Callers bracket the
+// whole teardown+mutation with begin/end; OpenPluginEditor refuses to open
+// while any rebuild is pending. Counter (not bool): overlapping LoadPreset +
+// ClearChain must not un-gate each other early.
+void beginChainRebuild();
+void endChainRebuild();
+bool isChainRebuildPending();
+
 // ── Shared load helpers (used by the workers here and SetSlotState) ──────
 // Decode a state blob in EITHER base64 flavour (JUCE-proprietary first,
 // standard RFC-4648 fallback when `allowStandard` — IR/NAM slots only).

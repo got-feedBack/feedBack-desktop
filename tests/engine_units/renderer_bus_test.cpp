@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 using slopsmith::RendererBus;
@@ -165,9 +166,35 @@ static void testFlushOnDisable()
     assert(dl[1] == 7.0f && "post-re-enable audio must be the fresh push");
 }
 
+// Rate validation (PR #107 review): non-finite rates cross the JS/IPC
+// boundary; NaN passes a plain `<= 0` check, and a subnormal source rate can
+// underflow step to 0 — both must be rejected before the resample loop.
+// A bad sourceRate falls back to deviceRate (documented behaviour).
+static void testRejectsUnusableRates()
+{
+    RendererBus bus;
+    bus.setEnabled(true, 1.0f);
+    const auto chunk = rampChunk(128, 1.0f, 0.0f);
+    const double nan = std::nan("");
+    const double inf = std::numeric_limits<double>::infinity();
+    assert(!bus.push(chunk.data(), 128, 48000.0, nan));
+    assert(!bus.push(chunk.data(), 128, 48000.0, inf));
+    assert(!bus.push(chunk.data(), 128, 48000.0, -48000.0));
+    assert(!bus.push(chunk.data(), 128, 48000.0, 0.0));
+    // step underflow: denormal source over huge device rate → step == 0.
+    assert(!bus.push(chunk.data(), 128, 5e-324, 1e308));
+    assert(bus.metrics().pushedFrames == 0 && "rejected pushes must stage nothing");
+    // NaN/Inf/negative SOURCE rate falls back to deviceRate (step == 1).
+    assert(bus.push(chunk.data(), 128, nan, 48000.0));
+    assert(bus.push(chunk.data(), 128, inf, 48000.0));
+    assert(bus.push(chunk.data(), 128, -1.0, 48000.0));
+    assert(bus.metrics().pushedFrames > 0);
+}
+
 int main()
 {
     testEqualRateBitExact();
+    testRejectsUnusableRates();
     testResampleContinuityAcrossPushes();
     testPrimeGate();
     testUnderflowReprimes();

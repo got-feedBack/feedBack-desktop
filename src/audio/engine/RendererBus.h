@@ -62,8 +62,12 @@ public:
     {
         if (!busEnabled.load(std::memory_order_acquire)) return false;
         if (interleavedLR == nullptr || frames <= 0) return false;
-        if (deviceRate <= 0.0) return false;
-        if (!(sourceRate > 0.0)) sourceRate = deviceRate;
+        // Both rates cross the JS/IPC boundary: reject NaN/Inf (a NaN
+        // deviceRate passes a plain `<= 0.0` check) and a step that
+        // underflowed to zero (subnormal source rate), either of which would
+        // make the resample loop index garbage or never advance.
+        if (!std::isfinite(deviceRate) || deviceRate <= 0.0) return false;
+        if (!std::isfinite(sourceRate) || sourceRate <= 0.0) sourceRate = deviceRate;
 
         uint64_t w = ring.beginWrite();
 
@@ -73,6 +77,7 @@ public:
         // interpolation is continuous across pushes. Equal rates degenerate
         // to step == 1.0 (still exact: pos stays integral, frac == 0).
         const double step = sourceRate / deviceRate;
+        if (!std::isfinite(step) || step <= 0.0) return false;
         double pos = srcPos;
         uint64_t written = 0;
         while (true)

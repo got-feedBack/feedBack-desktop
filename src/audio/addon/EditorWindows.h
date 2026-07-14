@@ -19,7 +19,10 @@ void destroyAllPluginEditorWindowsOnMessageThread();
 // caller frees the processors those editors point at. Safe from the Node
 // thread (posts to the message thread and blocks, bounded) or the message
 // thread itself (inline). Clearing an empty map is cheap.
-void closeAllPluginEditorWindows();
+// Returns false when teardown did NOT complete (post refused or the bounded
+// wait timed out) — the caller must not free chain processors in that case
+// (#56 use-after-free).
+bool closeAllPluginEditorWindows();
 
 // N-API bindings (registered by NodeAddon's export table).
 Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info);

@@ -43,11 +43,15 @@ void doShutdown();
 // Dispatch `func` on the JUCE message thread and wait (bounded 15 s).
 // macOS: executes inline on the caller thread — no background pump exists
 // (AppKit owns the real main thread; see the fork note in the .cpp).
-void dispatchOnMessageThreadImpl(std::function<void()> func);
+// Returns false when the work did not complete: the post was refused
+// (message queue gone — `func` will never run) or the wait timed out
+// (`func` may still run later). Lifecycle callers must treat false as
+// "teardown/init did not happen" rather than continuing.
+bool dispatchOnMessageThreadImpl(std::function<void()> func);
 template <typename Func>
-inline void dispatchOnMessageThread(Func&& func)
+inline bool dispatchOnMessageThread(Func&& func)
 {
-    dispatchOnMessageThreadImpl(std::function<void()>(std::forward<Func>(func)));
+    return dispatchOnMessageThreadImpl(std::function<void()>(std::forward<Func>(func)));
 }
 
 // Pending-async-load registry: LoadVSTWorker / LoadPresetWorker block on a
