@@ -249,6 +249,27 @@ const feedBackDesktopApi = {
         stopAudio: () => ipcRenderer.invoke('audio:stopAudio'),
         isAudioRunning: () => ipcRenderer.invoke('audio:isAudioRunning'),
 
+        // Ownership leases (docs/audio-ownership-plan.md §2/§8). Exclusive
+        // leases arbitrate conflicting writers (signal chains, device config,
+        // playback); refcounted demands express additive intent (capture,
+        // detection) — the engine acts while any holder needs it. `tag` is the
+        // caller-attributed soft identity (§9 compound identity); the hard
+        // part is derived main-side from the sender and cannot be spoofed.
+        leases: {
+            acquire: (scope: string, tag?: string) => ipcRenderer.invoke('audio:leases:acquire', scope, tag),
+            release: (scope: string, tag?: string) => ipcRenderer.invoke('audio:leases:release', scope, tag),
+            takeover: (scope: string, tag?: string) => ipcRenderer.invoke('audio:leases:takeover', scope, tag),
+            getHolder: (scope: string) => ipcRenderer.invoke('audio:leases:getHolder', scope),
+            acquireDemand: (scope: string, tag?: string) => ipcRenderer.invoke('audio:leases:acquireDemand', scope, tag),
+            releaseDemand: (scope: string, tag?: string) => ipcRenderer.invoke('audio:leases:releaseDemand', scope, tag),
+            snapshot: () => ipcRenderer.invoke('audio:leases:snapshot'),
+            onEvent: (callback: (event: { event: string; payload: unknown }) => void) => {
+                const listener = (_e: Electron.IpcRendererEvent, data: { event: string; payload: unknown }) => callback(data);
+                ipcRenderer.on('audio:leases:event', listener);
+                return () => ipcRenderer.removeListener('audio:leases:event', listener);
+            },
+        },
+
         // Gain
         setGain: (which: string, value: number) => ipcRenderer.invoke('audio:setGain', which, value),
         setInputChannel: (channel: number) => ipcRenderer.invoke('audio:setInputChannel', channel),

@@ -9,10 +9,12 @@ import { app } from 'electron';
 import { isDebugEnabled, getDebugLogPath } from './debug-log';
 import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
+import { initLeaseBridge, LeaseBridge } from './lease-bridge';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
 let audio: AudioModule | null = null;
+let leaseBridge: LeaseBridge | null = null;
 
 type AudioDeviceSettings = {
     type: string;          // legacy alias = inputType when only type was stored
@@ -254,6 +256,23 @@ function loadNativeAddon(): AudioModule | null {
 export function initAudioBridge(): void {
     audio = loadNativeAddon();
     const audioEffects = createAudioEffectsExecutor(() => audio);
+    leaseBridge = initLeaseBridge(() => audio);
+
+    // ── Lease registry surface (ownership plan §2/§8; wiring in lease-bridge) ──
+
+    ipcMain.handle('audio:leases:acquire', (event, scope: unknown, tag: unknown) =>
+        leaseBridge!.acquire(event.sender, scope, tag));
+    ipcMain.handle('audio:leases:release', (event, scope: unknown, tag: unknown) =>
+        leaseBridge!.release(event.sender, scope, tag));
+    ipcMain.handle('audio:leases:takeover', (event, scope: unknown, tag: unknown) =>
+        leaseBridge!.takeover(event.sender, scope, tag));
+    ipcMain.handle('audio:leases:getHolder', (_event, scope: unknown) =>
+        leaseBridge!.getHolder(scope));
+    ipcMain.handle('audio:leases:acquireDemand', (event, scope: unknown, tag: unknown) =>
+        leaseBridge!.acquireDemand(event.sender, scope, tag));
+    ipcMain.handle('audio:leases:releaseDemand', (event, scope: unknown, tag: unknown) =>
+        leaseBridge!.releaseDemand(event.sender, scope, tag));
+    ipcMain.handle('audio:leases:snapshot', () => leaseBridge!.snapshot());
 
     if (audio) {
         // Redirect native stderr to the debug log before init() runs — that's
@@ -585,11 +604,21 @@ export function initAudioBridge(): void {
 
     // ── Audio Control ──────────────────────────────────────────────────────
 
-    ipcMain.handle('audio:startAudio', () => {
+    ipcMain.handle('audio:startAudio', (event) => {
+        // Raw start = user authority (device screen). Resumes any demands the
+        // last raw stop suspended (§8.3). Plugin callers should migrate to
+        // the `capture` demand (audio:leases:acquireDemand) — log-once
+        // telemetry tracks who still comes through here (§6.8).
+        leaseBridge?.noteLegacyCall(event.sender, 'audio:startAudio');
         audio?.startAudio();
+        leaseBridge?.onUserStartAudio();
     });
 
-    ipcMain.handle('audio:stopAudio', () => {
+    ipcMain.handle('audio:stopAudio', (event) => {
+        // Raw stop always wins: engine stops, demands suspend (not clear) so
+        // holders resume on the next user start (§8.3).
+        leaseBridge?.noteLegacyCall(event.sender, 'audio:stopAudio');
+        leaseBridge?.onUserStopAudio();
         audio?.stopAudio();
     });
 
@@ -746,8 +775,17 @@ export function initAudioBridge(): void {
     // verifier path and the always-on home tuner cost no ONNX inference.
     // typeof-guarded so a downlevel addon (no gate) simply ignores it — ML then
     // runs as before, i.e. fail-safe to current behaviour.
-    ipcMain.handle('audio:setNoteDetectionEnabled', (_event, enabled: boolean) => {
+    ipcMain.handle('audio:setNoteDetectionEnabled', (event, enabled: boolean) => {
         if (!audio || typeof audio.setNoteDetectionEnabled !== 'function') return;
+        leaseBridge?.noteLegacyCall(event.sender, 'audio:setNoteDetectionEnabled');
+        // Ownership plan 6.3: a raw disarm must not kill detection while a
+        // demand holder still needs it armed — the "whichever minigame
+        // disarms last kills a concurrent consumer" bug. Raw arms pass
+        // through (they agree with any active demand).
+        if (!enabled && leaseBridge?.shouldIgnoreRawDetectionDisarm()) {
+            console.info('[audio] raw detection disarm ignored — detection demand active (plan 6.3)');
+            return;
+        }
         try {
             audio.setNoteDetectionEnabled(Boolean(enabled));
         } catch (e) {
@@ -1394,6 +1432,10 @@ export function initAudioBridge(): void {
 }
 
 export function shutdownAudio(): void {
+    if (leaseBridge) {
+        try { leaseBridge.dispose(); } catch { /* silent fail during shutdown */ }
+        leaseBridge = null;
+    }
     if (audio) {
         try {
             audio.shutdown();

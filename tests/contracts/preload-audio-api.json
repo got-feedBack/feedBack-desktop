@@ -39,6 +39,7 @@
     "isMlNoteDetection",
     "isMonitorMuted",
     "isStreamOutputActive",
+    "leases",
     "listInputDevices",
     "listSources",
     "loadBackingTrack",
