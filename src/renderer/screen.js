@@ -965,7 +965,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 if (ok) {
                     const inputChannel = parseInt(inputChannelSelect.value);
                     if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
-                    await api.startAudio();
+                    // User-initiated device change: clear any user-stop latch.
+                    await (api.userStartAudio ? api.userStartAudio() : api.startAudio());
                     audioRunning = true;
                     toggleBtn.textContent = 'Stop';
                     statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
@@ -1523,13 +1524,16 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         // Start/Stop audio
         toggleBtn.addEventListener('click', async () => {
             if (audioRunning) {
-                await api.stopAudio();
+                // User authority (§8.3): latches the stop so plugin keep-alive
+                // watchdogs (nam_tone) and fresh capture demands can't restart
+                // the engine until the user starts again.
+                await (api.userStopAudio ? api.userStopAudio() : api.stopAudio());
                 audioRunning = false;
                 toggleBtn.textContent = 'Start';
                 statusDot.className = 'w-3 h-3 rounded-full bg-yellow-500';
                 statusText.textContent = 'Audio stopped';
             } else {
-                await api.startAudio();
+                await (api.userStartAudio ? api.userStartAudio() : api.startAudio());
                 audioRunning = true;
                 toggleBtn.textContent = 'Stop';
                 statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
@@ -1608,7 +1612,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
                 await api.setMonitorMute(monitorMuteCheckbox.checked);
                 await api.setMonitorKill?.(monitorKillCheckbox.checked);
-                await api.startAudio();
+                // Apply-device is a user action: clear any user-stop latch.
+                await (api.userStartAudio ? api.userStartAudio() : api.startAudio());
                 audioRunning = true;
                 toggleBtn.textContent = 'Stop';
                 statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';

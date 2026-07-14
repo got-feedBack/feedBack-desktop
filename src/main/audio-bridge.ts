@@ -624,19 +624,37 @@ export function initAudioBridge(): void {
     // ── Audio Control ──────────────────────────────────────────────────────
 
     ipcMain.handle('audio:startAudio', (event) => {
-        // Raw start = user authority (device screen). Resumes any demands the
-        // last raw stop suspended (§8.3). Plugin callers should migrate to
-        // the `capture` demand (audio:leases:acquireDemand) — log-once
-        // telemetry tracks who still comes through here (§6.8).
+        // Legacy raw start (unmigrated plugins, programmatic paths). While
+        // the user-stop latch is set this is SUPPRESSED — found in the field:
+        // nam_tone's keep-alive watchdog restarted the engine 1.5 s after a
+        // user stop (§8.3). User authority lives on audio:userStartAudio.
         leaseBridge?.noteLegacyCall(event.sender, 'audio:startAudio');
+        if (leaseBridge?.isUserStopLatched()) {
+            leaseBridge.noteLegacyCall(event.sender, 'audio:startAudio[suppressed-by-user-stop]');
+            return;
+        }
         audio?.startAudio();
-        leaseBridge?.onUserStartAudio();
     });
 
     ipcMain.handle('audio:stopAudio', (event) => {
-        // Raw stop always wins: engine stops, demands suspend (not clear) so
-        // holders resume on the next user start (§8.3).
+        // Legacy raw stop: stops the engine but is NOT user authority — the
+        // device-apply flow and unmigrated plugins use it transiently. The
+        // user's stop (latch + demand suspension) is audio:userStopAudio.
         leaseBridge?.noteLegacyCall(event.sender, 'audio:stopAudio');
+        audio?.stopAudio();
+    });
+
+    ipcMain.handle('audio:userStartAudio', () => {
+        // Device screen only: clears the user-stop latch, resumes suspended
+        // demands, starts the engine (§8.3).
+        leaseBridge?.onUserStartAudio();
+        audio?.startAudio();
+    });
+
+    ipcMain.handle('audio:userStopAudio', () => {
+        // Device screen only: user stop always wins — latch on, demands
+        // suspended, engine stopped. Legacy raw starts stay suppressed until
+        // the user starts again (§8.3).
         leaseBridge?.onUserStopAudio();
         audio?.stopAudio();
     });

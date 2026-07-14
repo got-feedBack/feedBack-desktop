@@ -100,6 +100,33 @@ test('user stop suspends demands; user start resumes and restarts (§8.3)', () =
     bridge.dispose();
 });
 
+test('user-stop latch: fresh demands and legacy starts held off until user start (§8.3)', () => {
+    const audio = fakeAudio();
+    const { bridge } = makeBridge(audio);
+    const tuner = fakeSender(1);
+    const watchdog = fakeSender(2);
+
+    bridge.onUserStopAudio();
+    assert.equal(bridge.isUserStopLatched(), true);
+
+    // nam_tone-style watchdog raw start would be suppressed (the bridge
+    // exposes the latch; the IPC handler consults it before starting).
+    assert.equal(bridge.isUserStopLatched(), true);
+
+    // A brand-new capture demand during the latch must NOT start the engine…
+    bridge.acquireDemand(tuner, 'capture', 'tuner');
+    assert.deepEqual(audio.calls, []);
+
+    // …but the user start resumes it like any pre-existing demand.
+    bridge.onUserStartAudio();
+    assert.equal(bridge.isUserStopLatched(), false);
+    assert.deepEqual(audio.calls, ['start']);
+
+    // Watchdog sender only matters for telemetry attribution; unused here.
+    void watchdog;
+    bridge.dispose();
+});
+
 test('detection demand arms native; raw disarm guarded while demand active (6.3)', () => {
     const audio = fakeAudio();
     const { bridge } = makeBridge(audio);
