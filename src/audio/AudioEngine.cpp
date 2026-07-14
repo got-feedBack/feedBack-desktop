@@ -270,7 +270,7 @@ AudioEngine::LatencyBreakdown AudioEngine::getLatencyBreakdown() const
 
     // Song audio over the renderer bus is delayed by the measured bus fill —
     // a term no previous latency figure surfaced (deep-read 5).
-    const auto busMetrics = rendererBus.metrics();
+    const auto busMetrics = mixer.defaultBus().metrics();
     if (busMetrics.enabled)
         b.rendererBusMs = ms((double) busMetrics.fillFrames);
     return b;
@@ -815,6 +815,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     if (streamGuitarScratch.getNumSamples() < streamScratchCap) streamGuitarScratch.setSize(2, streamScratchCap, false, false, true);
     streamSink.prepareProducerScratch();
     if (rendererBusPullScratch.getNumSamples() < streamScratchCap) rendererBusPullScratch.setSize(2, streamScratchCap, false, false, true);
+    if (mixerChannelScratch.getNumSamples() < streamScratchCap) mixerChannelScratch.setSize(2, streamScratchCap, false, false, true);
 
     // Prepare each ACTIVE PRIMARY-device source's DSP and reset its rings for a
     // clean cold start. Inactive pooled chains stay unprepared (no threads). EXTRA-
@@ -881,6 +882,7 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
     if (streamGuitarScratch.getNumSamples() < streamScratchCap) streamGuitarScratch.setSize(2, streamScratchCap, false, false, true);
     streamSink.prepareProducerScratch();
     if (rendererBusPullScratch.getNumSamples() < streamScratchCap) rendererBusPullScratch.setSize(2, streamScratchCap, false, false, true);
+    if (mixerChannelScratch.getNumSamples() < streamScratchCap) mixerChannelScratch.setSize(2, streamScratchCap, false, false, true);
     // NOTE: outputBackingBuffer is sized by audioDeviceAboutToStart() from the
     // INPUT device's block size — it's the split-input DSP scratch, not an
     // output-side buffer. Don't touch it here: resizing from the output
@@ -1305,21 +1307,29 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
 
 bool AudioEngine::pushRendererAudio(const float* interleavedLR, int frames, double sourceRate)
 {
-    // Producer-side resample + publish live on RendererBus (engine/RendererBus.h).
-    return rendererBus.push(interleavedLR, frames, sourceRate, getCurrentSampleRate());
+    // Producer-side resample + publish live on channel #0's bus (the
+    // renderer-master default channel — engine/Mixer.h).
+    return mixer.defaultBus().push(interleavedLR, frames, sourceRate, getCurrentSampleRate());
 }
 
 int AudioEngine::pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples)
 {
-    // Cold start before about-to-start sized the scratch — skip, never alloc
-    // on the RT thread (same rule as the stream scratches).
+    // Cold start before about-to-start sized the scratches — skip, never
+    // alloc on the RT thread (same rule as the stream scratches).
     if (dest.getNumSamples() < numSamples || dest.getNumChannels() < 2) return 0;
-    return rendererBus.pull(dest.getWritePointer(0), dest.getWritePointer(1), numSamples);
+    if (mixerChannelScratch.getNumSamples() < numSamples || mixerChannelScratch.getNumChannels() < 2) return 0;
+    dest.clear(0, 0, numSamples);
+    dest.clear(1, 0, numSamples);
+    const int contributed = mixer.pullMixInto(dest.getWritePointer(0), dest.getWritePointer(1),
+                                              numSamples,
+                                              mixerChannelScratch.getWritePointer(0),
+                                              mixerChannelScratch.getWritePointer(1));
+    return contributed > 0 ? numSamples : 0;
 }
 
 AudioEngine::RendererBusMetrics AudioEngine::getRendererBusMetrics() const
 {
-    const auto bm = rendererBus.metrics();
+    const auto bm = mixer.defaultBus().metrics();
     RendererBusMetrics m;
     m.pushedFrames   = bm.pushedFrames;
     m.consumedFrames = bm.consumedFrames;

@@ -4,6 +4,7 @@
 #include "engine/PackedStereoRing.h"
 #include "engine/EngineState.h"
 #include "engine/RendererBus.h"
+#include "engine/Mixer.h"
 #include "engine/StreamSink.h"
 #include "engine/BackingPlayer.h"
 #include "engine/DeviceSetup.h"
@@ -257,7 +258,7 @@ public:
     // mixer path is silenced. SPSC: producer is the main-process IPC thread,
     // consumer is whichever output callback is live (duplex or split). Default
     // off → zero behaviour change.
-    void setRendererBus(bool enabled, float gain) { rendererBus.setEnabled(enabled, gain); }
+    void setRendererBus(bool enabled, float gain) { mixer.defaultBus().setEnabled(enabled, gain); }
     // Interleaved stereo frames at `sourceRate`; linear-resampled to the device
     // rate on the producer thread (fractional position + previous frame carried
     // across calls). Returns false when the bus is disabled or the engine is
@@ -270,6 +271,24 @@ public:
         bool enabled = false;
     };
     RendererBusMetrics getRendererBusMetrics() const;
+
+    // ── Mixer channel API (ownership plan §5.1, tiers 1–3). Control-thread
+    // calls; the audio thread only ever mixes. Channel #0 is the renderer bus
+    // above; these manage the bespoke channels. All bounds/values are
+    // sanitized natively (tier-2 rule: no JS-side trust).
+    int mixerCreateChannel(const char* label, const char* kind, const char* holder)
+    {
+        return mixer.createChannel(label, kind, holder, isAudioRunning());
+    }
+    bool mixerReleaseChannel(int id) { return mixer.releaseChannel(id, isAudioRunning()); }
+    bool mixerPushChannel(int id, const float* interleavedLR, int frames, double sourceRate)
+    {
+        return mixer.pushChannel(id, interleavedLR, frames, sourceRate, getCurrentSampleRate());
+    }
+    bool mixerSetChannelGain(int id, float gain) { return mixer.setChannelGain(id, gain); }
+    bool mixerSetChannelMute(int id, bool mute) { return mixer.setChannelMute(id, mute); }
+    bool mixerSetChannelGroup(int id, int group) { return mixer.setChannelGroup(id, group); }
+    int mixerListChannels(slopsmith::Mixer::ChannelInfo* out) const { return mixer.listChannels(out); }
 
     float getStreamSinkLevel() const { return streamSink.getLevel(); }
     uint64_t getStreamUnderflowCount() const { return streamSink.getUnderflowCount(); }
@@ -481,19 +500,23 @@ private:
     static constexpr int kOutputRingFrames = 4096;
     slopsmith::PackedStereoRing<kOutputRingFrames> outputRing;
 
-    // ── Renderer-audio bus (see engine/RendererBus.h — moved in TLC phase 2)
-    slopsmith::RendererBus rendererBus;
-    // Shared consumer step for the duplex and split output paths: drain one
-    // block from the renderer-bus ring into `dest` (stereo, bus gain applied,
-    // dest cleared first). Returns numSamples on success, 0 when gated
-    // (disabled, priming, underflow, scratch undersized). Single consumer —
-    // call exactly once per output block; the caller mixes the pulled block
-    // into the device output AND hands it to composeAndPushStreamMix so the
-    // streamer submix carries renderer-fed song audio too.
+    // ── Engine-owned mixer (ownership plan §5). Channel #0 is the renderer
+    // bus (permanent default, byte-compatible with the pre-mixer surface);
+    // bespoke channels are producer-requested. See engine/Mixer.h.
+    slopsmith::Mixer mixer;
+    // Shared consumer step for the duplex and split output paths: mix one
+    // block from every ready mixer channel into `dest` (stereo, per-channel
+    // gain ramped, dest cleared first). Returns numSamples when any channel
+    // contributed, 0 otherwise. Single consumer — call exactly once per
+    // output block; the caller mixes the pulled block into the device output
+    // AND hands it to composeAndPushStreamMix so the streamer submix carries
+    // renderer-fed song audio too.
     int pullRendererBus(juce::AudioBuffer<float>& dest, int numSamples);
-    // Scratch for the per-block renderer-bus pull. Fixed capacity, sized once
-    // in about-to-start next to the stream scratches (same no-realloc rule).
+    // Scratches for the per-block mixer pull: the mixed result + one channel
+    // pull scratch. Fixed capacity, sized once in about-to-start next to the
+    // stream scratches (same no-realloc rule).
     juce::AudioBuffer<float> rendererBusPullScratch;
+    juce::AudioBuffer<float> mixerChannelScratch;
 
     std::atomic<uint64_t> outputUnderflowCount{0};
     std::atomic<uint64_t> inputOverflowCount{0};

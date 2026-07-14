@@ -388,6 +388,13 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("setRendererBus", Napi::Function::New(env, SetRendererBus));
     exports.Set("pushRendererAudio", Napi::Function::New(env, PushRendererAudio));
     exports.Set("getRendererBusMetrics", Napi::Function::New(env, GetRendererBusMetrics));
+    exports.Set("mixerCreateChannel", Napi::Function::New(env, MixerCreateChannel));
+    exports.Set("mixerReleaseChannel", Napi::Function::New(env, MixerReleaseChannel));
+    exports.Set("mixerPushChannel", Napi::Function::New(env, MixerPushChannel));
+    exports.Set("mixerSetChannelGain", Napi::Function::New(env, MixerSetChannelGain));
+    exports.Set("mixerSetChannelMute", Napi::Function::New(env, MixerSetChannelMute));
+    exports.Set("mixerSetChannelGroup", Napi::Function::New(env, MixerSetChannelGroup));
+    exports.Set("mixerListChannels", Napi::Function::New(env, MixerListChannels));
     exports.Set("getStreamSinkLevel", Napi::Function::New(env, GetStreamSinkLevel));
     exports.Set("isStreamOutputActive", Napi::Function::New(env, IsStreamOutputActive));
     exports.Set("getStreamUnderflowCount", Napi::Function::New(env, GetStreamUnderflowCount));

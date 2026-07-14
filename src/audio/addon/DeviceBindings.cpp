@@ -425,6 +425,118 @@ Napi::Value GetRendererBusMetrics(const Napi::CallbackInfo& info)
     return obj;
 }
 
+// ── Mixer channel bindings (ownership plan §5.1, tiers 1–3) ─────────────────
+// Channel #0 stays on the setRendererBus / pushRendererAudio surface above;
+// these manage bespoke channels. All string/number inputs are bounded and
+// sanitized native-side (tier-2 rule).
+
+// mixerCreateChannel(label:string, kind:string, holder:string) -> number (id, -1 = no-capacity)
+Napi::Value MixerCreateChannel(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine || info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString())
+        return Napi::Number::New(env, -1);
+    const std::string label  = info[0].As<Napi::String>().Utf8Value();
+    const std::string kind   = info[1].As<Napi::String>().Utf8Value();
+    const std::string holder = info[2].As<Napi::String>().Utf8Value();
+    return Napi::Number::New(env, liveEngine->mixerCreateChannel(label.c_str(), kind.c_str(), holder.c_str()));
+}
+
+// mixerReleaseChannel(id:number) -> boolean (fade-to-silence reclaim)
+Napi::Value MixerReleaseChannel(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    const bool ok = liveEngine && info.Length() >= 1 && info[0].IsNumber()
+        && liveEngine->mixerReleaseChannel(info[0].As<Napi::Number>().Int32Value());
+    return Napi::Boolean::New(info.Env(), ok);
+}
+
+// mixerPushChannel(id:number, interleavedLR:Float32Array, sourceRate:number) -> boolean
+Napi::Value MixerPushChannel(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine || info.Length() < 3 || !info[0].IsNumber() || !info[1].IsTypedArray() || !info[2].IsNumber())
+        return Napi::Boolean::New(env, false);
+    auto ta = info[1].As<Napi::TypedArray>();
+    if (ta.TypedArrayType() != napi_float32_array)
+        return Napi::Boolean::New(env, false);
+    auto f32 = info[1].As<Napi::Float32Array>();
+    const size_t samples = f32.ElementLength();
+    if (samples < 2)
+        return Napi::Boolean::New(env, false);
+    const bool ok = liveEngine->mixerPushChannel(
+        info[0].As<Napi::Number>().Int32Value(),
+        f32.Data(), (int) (samples / 2),
+        info[2].As<Napi::Number>().DoubleValue());
+    return Napi::Boolean::New(env, ok);
+}
+
+// mixerSetChannelGain(id:number, gain:number) -> boolean (native-clamped)
+Napi::Value MixerSetChannelGain(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    const bool ok = liveEngine && info.Length() >= 2 && info[0].IsNumber() && info[1].IsNumber()
+        && liveEngine->mixerSetChannelGain(info[0].As<Napi::Number>().Int32Value(),
+                                           (float) info[1].As<Napi::Number>().DoubleValue());
+    return Napi::Boolean::New(info.Env(), ok);
+}
+
+// mixerSetChannelMute(id:number, mute:boolean) -> boolean
+Napi::Value MixerSetChannelMute(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    const bool ok = liveEngine && info.Length() >= 2 && info[0].IsNumber() && info[1].IsBoolean()
+        && liveEngine->mixerSetChannelMute(info[0].As<Napi::Number>().Int32Value(),
+                                           info[1].As<Napi::Boolean>().Value());
+    return Napi::Boolean::New(info.Env(), ok);
+}
+
+// mixerSetChannelGroup(id:number, group:number) -> boolean (§8.13; -1 = ungroup)
+Napi::Value MixerSetChannelGroup(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    const bool ok = liveEngine && info.Length() >= 2 && info[0].IsNumber() && info[1].IsNumber()
+        && liveEngine->mixerSetChannelGroup(info[0].As<Napi::Number>().Int32Value(),
+                                            info[1].As<Napi::Number>().Int32Value());
+    return Napi::Boolean::New(info.Env(), ok);
+}
+
+// mixerListChannels() -> [{id,label,kind,holder,gain,mute,group,enabled,
+//   fillFrames,capacityFrames,pushedFrames,consumedFrames,underflowCount,
+//   overflowCount}] — tier-1 observe surface.
+Napi::Value MixerListChannels(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto arr = Napi::Array::New(env);
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine) return arr;
+    slopsmith::Mixer::ChannelInfo channels[slopsmith::Mixer::kMaxChannels];
+    const int count = liveEngine->mixerListChannels(channels);
+    for (int i = 0; i < count; ++i)
+    {
+        const auto& c = channels[i];
+        auto obj = Napi::Object::New(env);
+        obj.Set("id", c.id);
+        obj.Set("label", c.label);
+        obj.Set("kind", c.kind);
+        obj.Set("holder", c.holder);
+        obj.Set("gain", c.gain);
+        obj.Set("mute", c.mute);
+        obj.Set("group", c.group);
+        obj.Set("enabled", c.metrics.enabled);
+        obj.Set("fillFrames", c.metrics.fillFrames);
+        obj.Set("capacityFrames", c.metrics.capacityFrames);
+        obj.Set("pushedFrames", (double) c.metrics.pushedFrames);
+        obj.Set("consumedFrames", (double) c.metrics.consumedFrames);
+        obj.Set("underflowCount", (double) c.metrics.underflowCount);
+        obj.Set("overflowCount", (double) c.metrics.overflowCount);
+        arr.Set((uint32_t) i, obj);
+    }
+    return arr;
+}
+
 // getStreamSinkLevel() -> number (peak 0..1+)
 Napi::Value GetStreamSinkLevel(const Napi::CallbackInfo& info)
 {
