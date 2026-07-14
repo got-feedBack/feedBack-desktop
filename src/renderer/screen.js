@@ -210,11 +210,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
 
     function saveDeviceSettings(settings = captureDeviceSettings()) {
+        // Single persistence store (TLC Part II §4): the file-backed settings
+        // are the only writer target. The old parallel localStorage copy meant
+        // a main-side migration/reset could lose the timestamp race against a
+        // stale browser copy and resurrect wiped settings.
         const snapshot = {
             ...cloneDeviceSettings(settings),
             savedAt: Date.now(),
         };
-        try { localStorage.setItem('slopsmith-audio-device', JSON.stringify(snapshot)); } catch (_) {}
         pendingDeviceSave = pendingDeviceSave
             .catch(() => null)
             .then(() => {
@@ -255,17 +258,29 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         } catch (e) {
             console.warn('[audio-engine] Failed to load file-backed device settings:', e);
         }
+        // Migration only (TLC Part II §4): 'slopsmith-audio-device' was a
+        // second store racing the file on savedAt. Import a strictly-newer
+        // browser copy into the file store ONCE, then delete the key either
+        // way — after this the file is the single source of truth.
         let browserSettings = null;
         try {
             const raw = localStorage.getItem('slopsmith-audio-device');
             browserSettings = normalizeDeviceSettings(raw ? JSON.parse(raw) : null);
         } catch { browserSettings = null; }
-        if (fileSettings && browserSettings) {
-            return getDeviceSettingsSavedAt(browserSettings) > getDeviceSettingsSavedAt(fileSettings)
-                ? browserSettings
-                : fileSettings;
+        if (browserSettings !== null) {
+            const browserNewer = !fileSettings
+                || getDeviceSettingsSavedAt(browserSettings) > getDeviceSettingsSavedAt(fileSettings);
+            if (browserNewer) {
+                try {
+                    if (typeof api.saveDeviceSettings === 'function') await api.saveDeviceSettings(browserSettings);
+                } catch (e) {
+                    console.warn('[audio-engine] device-settings migration save failed:', e);
+                }
+            }
+            try { localStorage.removeItem('slopsmith-audio-device'); } catch (_) {}
+            if (browserNewer) return browserSettings;
         }
-        return fileSettings || browserSettings;
+        return fileSettings;
     }
 
     function hasSettingValue(value) {
