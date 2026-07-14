@@ -886,12 +886,28 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
         return deferred.Promise();
     }
 
+    // Validate + read the argument BEFORE arming the barrier: with a
+    // non-string arg, As<Napi::String>() throws (JS TypeError / C++
+    // exception), and anything thrown between begin and the worker taking
+    // ownership would leak the barrier and block editor opens forever.
+    if (!info[0].IsString())
+    {
+        auto obj = Napi::Object::New(env);
+        obj.Set("success", false);
+        obj.Set("error", "preset must be a JSON string");
+        deferred.Resolve(obj);
+        return deferred.Promise();
+    }
+    auto json = info[0].As<Napi::String>().Utf8Value();
+
     // Arm the rebuild barrier BEFORE editor teardown: between closeAll…()
     // returning and the queued worker acquiring chainMutationMutex, nothing
     // else stops OpenPluginEditor from opening a fresh editor whose processor
     // the worker is about to free (#56). The barrier gates editor opens for
     // the whole teardown+rebuild window; the worker releases it on every
-    // Execute() exit path.
+    // Execute() exit path. Nothing between here and Queue() can throw: the
+    // teardown-failure path below releases explicitly, and the worker's
+    // BarrierRelease guard covers every Execute() exit.
     slopsmith::addon::beginChainRebuild();
 
     // Tear down any open in-process editor windows NOW, on the N-API/main
@@ -915,8 +931,7 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
         return deferred.Promise();
     }
 
-    auto json = info[0].As<Napi::String>().Utf8Value();
-    auto worker = new LoadPresetWorker(env, deferred, json);
+    auto worker = new LoadPresetWorker(env, deferred, std::move(json));
     worker->Queue();
     return deferred.Promise();
 }
