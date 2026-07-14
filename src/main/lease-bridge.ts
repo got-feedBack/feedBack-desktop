@@ -47,6 +47,10 @@ export type LeaseBridge = {
     // keep-alive watchdog, any unmigrated caller) must be suppressed — only
     // an explicit user start clears it.
     isUserStopLatched(): boolean;
+    // Wrap a native-audio accessor so its startAudio honors the user-stop
+    // latch — for main-process callers that bypass the IPC handlers (the
+    // audio-effects executor's `startAudio: true` chain plans, plan 6.1).
+    gateNativeAudio<T extends Record<string, (...args: any[]) => any>>(getAudio: () => T | null): () => T | null;
     // true = swallow the raw disarm because a demand holder still needs
     // detection armed (the 6.3 "last disarmer kills a concurrent consumer" fix).
     shouldIgnoreRawDetectionDisarm(): boolean;
@@ -247,6 +251,30 @@ export function initLeaseBridge(getAudio: () => AudioModule, options: { broadcas
 
         isUserStopLatched() {
             return userStopLatch;
+        },
+
+        gateNativeAudio(getAudioFn) {
+            return () => {
+                const target = getAudioFn();
+                if (!target) return null;
+                return new Proxy(target, {
+                    get(t, prop, receiver) {
+                        if (prop === 'startAudio') {
+                            return (...args: unknown[]) => {
+                                if (userStopLatch) {
+                                    // Strict §8.3: only the device screen's
+                                    // user start resumes — a chain plan's
+                                    // startAudio waits it out.
+                                    console.info('[leases] executor startAudio suppressed — user stop latched (plan §8.3)');
+                                    return undefined;
+                                }
+                                return t.startAudio?.(...args);
+                            };
+                        }
+                        return Reflect.get(t, prop, receiver);
+                    },
+                });
+            };
         },
 
         shouldIgnoreRawDetectionDisarm() {
