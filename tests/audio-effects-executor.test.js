@@ -390,3 +390,51 @@ test('preload exposes the trusted audio-effects executor surface', () => {
     assert.equal(bridge.includes('vstSlotPaths.clear();\n        return await audioEffects.loadChainPlan(request);'), true);
     assert.equal(bridge.includes('if (normalizedPayload.inputType !== normalizedPayload.outputType)'), true);
 });
+
+test('audio-effects executor detects a foreign chain write via chainGeneration and reports a stale route', async () => {
+    const { createAudioEffectsExecutor } = loadExecutorModule();
+    // Native stub with the phase-7a generation counter: our load lands at
+    // generation 5; a foreign writer (legacy loadPreset / clearChain) later
+    // bumps it to 6, invalidating the route's stageSlots map.
+    let generation = 5;
+    const bypassCalls = [];
+    const native = {
+        loadPreset: async presetJson => ({ success: true, slotsLoaded: JSON.parse(presetJson).chain.length, chainGeneration: generation }),
+        getChainState: () => [{ id: 10 }, { id: 11 }],
+        getChainGeneration: () => generation,
+        setBypass: (slotId, bypassed) => { bypassCalls.push([slotId, bypassed]); return true; },
+        setMultiBypass: changes => { bypassCalls.push(['multi', changes]); return true; },
+        setParameter: () => true,
+    };
+    const executor = createAudioEffectsExecutor(() => native);
+    const loaded = await executor.loadChainPlan({
+        authorization: 'playback-session',
+        plan: plan(),
+        assets: {
+            'asset:pre': { kind: 'nam', path: tempAsset('.nam'), safeName: 'pre' },
+            'asset:cab': { kind: 'ir', path: tempAsset('.wav'), safeName: 'cab' },
+        },
+    });
+    assert.equal(loaded.outcome, 'handled');
+
+    // Generation unchanged: stage ops flow normally.
+    const fresh = await executor.setStageBypass({ routeKey: 'desktop-main', stageId: 'pre', bypassed: true });
+    assert.equal(fresh.outcome, 'handled');
+    assert.equal(bypassCalls.length, 1);
+
+    // Foreign write bumps the native counter.
+    generation = 6;
+    const stale = await executor.setStageBypass({ routeKey: 'desktop-main', stageId: 'pre', bypassed: false });
+    assert.equal(stale.outcome, 'no-target');
+    assert.match(stale.reason, /modified by another writer/);
+    assert.equal(stale.payload.expectedGeneration, 5);
+    assert.equal(stale.payload.currentGeneration, 6);
+    assert.equal(bypassCalls.length, 1, 'stale route must NOT touch native slots');
+
+    // Segment activation and parameters are equally guarded.
+    const seg = await executor.activateSegment({ routeKey: 'desktop-main', segmentId: 'lead' });
+    assert.equal(seg.outcome, 'no-target');
+    const param = await executor.setStageParameter({ routeKey: 'desktop-main', stageId: 'pre', paramIndex: 0, value: 0.5 });
+    assert.equal(param.outcome, 'no-target');
+    assert.equal(bypassCalls.length, 1);
+});

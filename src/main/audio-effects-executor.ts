@@ -29,6 +29,7 @@ type AudioEffectsNativeAudio = {
     savePreset?: () => unknown;
     clearChain?: () => Promise<unknown> | unknown;
     getChainState?: () => unknown;
+    getChainGeneration?: () => unknown;
     setBypass?: (slotId: number, bypassed: boolean) => unknown;
     setMultiBypass?: (changes: Array<{ slotId: number; bypassed: boolean }>) => unknown;
     setParameter?: (slotId: number, paramIndex: number, value: number) => unknown;
@@ -89,6 +90,11 @@ type RouteState = {
     state: string;
     activeSegmentId: string;
     stageSlots: Map<string, number>;
+    // Native chainGeneration this route's stageSlots map was built against
+    // (phase 7a). A foreign writer (legacy loadPreset / clearChain) bumps the
+    // native counter, invalidating the slot ids; stage operations detect the
+    // divergence and report stale-route instead of mutating wrong slots.
+    chainGeneration: number;
     stageKinds: Map<string, string>;
     segments: ValidSegment[];
     loadedAt: string;
@@ -373,14 +379,22 @@ function validatePlan(request: unknown): { ok: true; plan: ValidPlan; presetJson
     };
 }
 
-function normalizeLoadResult(value: unknown): { success: boolean; slotsLoaded: number; error: string } {
+function normalizeLoadResult(value: unknown): { success: boolean; slotsLoaded: number; error: string; chainGeneration: number } {
     const record = asRecord(value);
-    if (!record) return { success: false, slotsLoaded: 0, error: 'Native load returned an unsupported result' };
+    if (!record) return { success: false, slotsLoaded: 0, error: 'Native load returned an unsupported result', chainGeneration: -1 };
     return {
         success: record.success === true,
         slotsLoaded: safeNumber(record.slotsLoaded, 0),
         error: bounded(record.error ?? ''),
+        // -1 = addon predates the counter; staleness checks then no-op.
+        chainGeneration: safeNumber(record.chainGeneration, -1),
     };
+}
+
+// Current native chainGeneration, or -1 when the addon doesn't expose it.
+function currentChainGeneration(nativeAudio: AudioEffectsNativeAudio | null): number {
+    if (!nativeAudio || typeof nativeAudio.getChainGeneration !== 'function') return -1;
+    try { return safeNumber(nativeAudio.getChainGeneration(), -1); } catch { return -1; }
 }
 
 function chainSlots(nativeAudio: AudioEffectsNativeAudio | null): Dict[] {
@@ -481,7 +495,7 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
             await trySetGain(nativeAudio, 'chain', 0);
             await trySetMonitorMute(nativeAudio, options.preloadMute.dryDuringLoad ? false : true);
         }
-        let result: { success: boolean; slotsLoaded: number; error: string };
+        let result: { success: boolean; slotsLoaded: number; error: string; chainGeneration: number };
         try {
             result = normalizeLoadResult(await nativeAudio.loadPreset(validation.presetJson));
         } catch (error) {
@@ -556,6 +570,23 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
             });
         }
 
+        // Detect a foreign write between our loadPreset and the getChainState
+        // slot mapping above: the mapped ids would describe someone else's
+        // chain. Roll back rather than store a poisoned route.
+        const generationNow = currentChainGeneration(nativeAudio);
+        if (result.chainGeneration >= 0 && generationNow >= 0 && generationNow !== result.chainGeneration) {
+            const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            return safeOutcome('degraded', 'Native chain was modified by another writer during plan load', {
+                routeKey: validation.plan.routeKey,
+                providerId: validation.plan.providerId,
+                planId: validation.plan.planId,
+                expectedGeneration: result.chainGeneration,
+                currentGeneration: generationNow,
+                rollbackApplied,
+            });
+        }
+
         const route: RouteState = {
             routeKey: validation.plan.routeKey,
             providerId: validation.plan.providerId,
@@ -563,6 +594,7 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
             state: result.slotsLoaded >= nativeStages.length ? 'loaded' : 'degraded',
             activeSegmentId: '',
             stageSlots,
+            chainGeneration: result.chainGeneration,
             stageKinds,
             segments: validation.plan.segments,
             loadedAt: now(),
@@ -634,6 +666,23 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         return updateOutcome(route, safeOutcome('handled', 'Audio-effects route gain applied', { route: safeRoute(route), gains }));
     }
 
+    // Stage operations act on the stageSlots map built at load time; a foreign
+    // chain write since then (legacy loadPreset / clearChain — the documented
+    // three-writer fight) makes those slot ids describe someone else's chain.
+    // Detect via chainGeneration and report a stale route (the provider should
+    // re-load its plan) instead of flipping bypass/params on wrong slots.
+    function staleRouteOutcome(route: RouteState, nativeAudio: AudioEffectsNativeAudio | null, extra: Dict): SafeOutcome | null {
+        if (route.chainGeneration < 0) return null;  // addon predates the counter
+        const generationNow = currentChainGeneration(nativeAudio);
+        if (generationNow < 0 || generationNow === route.chainGeneration) return null;
+        route.state = 'stale';
+        return safeOutcome('no-target', 'Native chain was modified by another writer since this route loaded — re-load the plan', {
+            ...extra,
+            expectedGeneration: route.chainGeneration,
+            currentGeneration: generationNow,
+        });
+    }
+
     async function setStageBypass(request: unknown): Promise<SafeOutcome> {
         const input = asRecord(request) || {};
         const routeKey = safeId(input.routeKey ?? DEFAULT_ROUTE_KEY, DEFAULT_ROUTE_KEY);
@@ -644,6 +693,8 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         if (slotId == null) return updateOutcome(route, safeOutcome('no-target', 'Audio-effects stage is not mapped to a native slot', { routeKey, stageId }));
         const nativeAudio = getAudio();
         if (!nativeAudio || typeof nativeAudio.setBypass !== 'function') return updateOutcome(route, safeOutcome('unavailable', 'Native stage bypass is unavailable', { routeKey, stageId }));
+        const stale = staleRouteOutcome(route, nativeAudio, { routeKey, stageId });
+        if (stale) return updateOutcome(route, stale);
         try {
             const result = await nativeAudio.setBypass(slotId, safeBool(input.bypassed, false));
             if (nativeFailure(result)) return updateOutcome(route, safeOutcome('failed', 'Native stage bypass returned failure', { routeKey, stageId }));
@@ -668,6 +719,8 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         }
         const nativeAudio = getAudio();
         if (!nativeAudio || typeof nativeAudio.setParameter !== 'function') return updateOutcome(route, safeOutcome('unavailable', 'Native stage parameter control is unavailable', { routeKey, stageId }));
+        const stale = staleRouteOutcome(route, nativeAudio, { routeKey, stageId });
+        if (stale) return updateOutcome(route, stale);
         try {
             const result = await nativeAudio.setParameter(slotId, paramIndex, value);
             if (nativeFailure(result)) return updateOutcome(route, safeOutcome('failed', 'Native stage parameter returned failure', { routeKey, stageId, paramIndex }));
@@ -687,6 +740,8 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         if (!segment) return updateOutcome(route, safeOutcome('no-target', 'Audio-effects segment is not present in the loaded plan', { routeKey, segmentId }));
         const nativeAudio = getAudio();
         if (!nativeAudio || typeof nativeAudio.setMultiBypass !== 'function') return updateOutcome(route, safeOutcome('unavailable', 'Native multi-bypass is unavailable', { routeKey, segmentId }));
+        const stale = staleRouteOutcome(route, nativeAudio, { routeKey, segmentId });
+        if (stale) return updateOutcome(route, stale);
         const active = new Set(segment.stageIds);
         const changes = Array.from(route.stageSlots.entries()).map(([stageId, slotId]) => ({
             slotId,
