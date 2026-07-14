@@ -49,6 +49,7 @@
     "loadPluginList",
     "loadPreset",
     "loadVST",
+    "mixer",
     "moveProcessor",
     "openPluginEditor",
     "probeDeviceOptions",

@@ -10,11 +10,13 @@ import { isDebugEnabled, getDebugLogPath } from './debug-log';
 import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
 import { initLeaseBridge, LeaseBridge } from './lease-bridge';
+import { initMixerBridge, MixerBridge } from './mixer-bridge';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
 let audio: AudioModule | null = null;
 let leaseBridge: LeaseBridge | null = null;
+let mixerBridge: MixerBridge | null = null;
 
 type AudioDeviceSettings = {
     type: string;          // legacy alias = inputType when only type was stored
@@ -273,6 +275,23 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:leases:releaseDemand', (event, scope: unknown, tag: unknown) =>
         leaseBridge!.releaseDemand(event.sender, scope, tag));
     ipcMain.handle('audio:leases:snapshot', () => leaseBridge!.snapshot());
+
+    // ── Mixer surface (ownership plan §5.1, tiers 1–3; wiring in mixer-bridge) ──
+
+    mixerBridge = initMixerBridge(() => audio);
+    ipcMain.handle('audio:mixer:requestChannel', (event, label: unknown, tag: unknown) =>
+        mixerBridge!.requestChannel(event.sender, label, tag));
+    ipcMain.handle('audio:mixer:releaseChannel', (event, channelId: unknown) =>
+        mixerBridge!.releaseChannel(event.sender, channelId));
+    ipcMain.handle('audio:mixer:push', (event, channelId: unknown, data: unknown, sourceRate: unknown) =>
+        mixerBridge!.push(event.sender, channelId, data, sourceRate));
+    ipcMain.handle('audio:mixer:setChannelGain', (_event, channelId: unknown, gain: unknown) =>
+        mixerBridge!.setChannelGain(channelId, gain));
+    ipcMain.handle('audio:mixer:setChannelMute', (_event, channelId: unknown, mute: unknown) =>
+        mixerBridge!.setChannelMute(channelId, mute));
+    ipcMain.handle('audio:mixer:setChannelGroup', (event, channelId: unknown, group: unknown) =>
+        mixerBridge!.setChannelGroup(event.sender, channelId, group));
+    ipcMain.handle('audio:mixer:listChannels', () => mixerBridge!.listChannels());
 
     if (audio) {
         // Redirect native stderr to the debug log before init() runs — that's
@@ -1432,6 +1451,10 @@ export function initAudioBridge(): void {
 }
 
 export function shutdownAudio(): void {
+    if (mixerBridge) {
+        try { mixerBridge.dispose(); } catch { /* silent fail during shutdown */ }
+        mixerBridge = null;
+    }
     if (leaseBridge) {
         try { leaseBridge.dispose(); } catch { /* silent fail during shutdown */ }
         leaseBridge = null;

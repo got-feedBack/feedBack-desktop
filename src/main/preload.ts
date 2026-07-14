@@ -249,6 +249,32 @@ const feedBackDesktopApi = {
         stopAudio: () => ipcRenderer.invoke('audio:stopAudio'),
         isAudioRunning: () => ipcRenderer.invoke('audio:isAudioRunning'),
 
+        // Engine-owned mixer (docs/audio-ownership-plan.md §5.1). Tier 1
+        // (observe) and tier 2 (mix — the fader belongs to the user, native
+        // clamps values) are open; tier 3 (produce) is bound to the
+        // requesting webContents: push/release/group from any other sender
+        // is refused. Channel #0 is the permanent renderer-master default.
+        mixer: {
+            requestChannel: (label: string, tag?: string) =>
+                ipcRenderer.invoke('audio:mixer:requestChannel', label, tag),
+            releaseChannel: (channelId: number) =>
+                ipcRenderer.invoke('audio:mixer:releaseChannel', channelId),
+            push: (channelId: number, interleavedLR: Float32Array, sourceRate: number) =>
+                ipcRenderer.invoke('audio:mixer:push', channelId, interleavedLR, sourceRate),
+            setChannelGain: (channelId: number, gain: number) =>
+                ipcRenderer.invoke('audio:mixer:setChannelGain', channelId, gain),
+            setChannelMute: (channelId: number, mute: boolean) =>
+                ipcRenderer.invoke('audio:mixer:setChannelMute', channelId, mute),
+            setChannelGroup: (channelId: number, group: number) =>
+                ipcRenderer.invoke('audio:mixer:setChannelGroup', channelId, group),
+            listChannels: () => ipcRenderer.invoke('audio:mixer:listChannels'),
+            onEvent: (callback: (event: { event: string; payload: unknown }) => void) => {
+                const listener = (_e: Electron.IpcRendererEvent, data: { event: string; payload: unknown }) => callback(data);
+                ipcRenderer.on('audio:mixer:event', listener);
+                return () => ipcRenderer.removeListener('audio:mixer:event', listener);
+            },
+        },
+
         // Ownership leases (docs/audio-ownership-plan.md §2/§8). Exclusive
         // leases arbitrate conflicting writers (signal chains, device config,
         // playback); refcounted demands express additive intent (capture,
