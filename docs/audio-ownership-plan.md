@@ -507,11 +507,22 @@ policy decisions.
    holder's leases ~5–10 s keyed on manifest identity; the same identity
    re-requesting restores them; timeout or destroy releases for real and
    notifies waiters. Destroy stays immediate. F5 never changes ownership.
-3. **User stop suspends demands.** Raw stop (device screen) always wins:
-   engine stops, `capture` demands enter *suspended* (not cleared), holders
-   get `capture-suspended` / `capture-resumed` events. Only user start
-   resumes. Same ride-through for `device-config` changes that restart the
-   engine.
+3. **User stop suspends demands.** Raw stop (device screen) wins at the
+   moment it happens: engine stops, `capture` demands enter *suspended* (not
+   cleared), holders get `capture-suspended` / `capture-resumed` events; raw
+   user start resumes them. Same ride-through for `device-config` changes
+   that restart the engine.
+   **REVISED 2026-07-15 (field testing)**: user stop is NOT a persistent
+   latch. A latch was implemented and reverted — this is an audio-first
+   game (note detection + hearing songs are core features), the app's
+   timebase assumes a running engine (highway jitters without it), and
+   there is no realistic use case for willfully keeping the engine off.
+   Stop is a momentary action; legitimate consumers (plugin keep-alives,
+   `startAudio: true` chain plans, new capture demands) may start the
+   engine again afterwards. If a true "keep audio off" need ever appears,
+   the right shape is a native `userWantsAudio` gate in the engine plus a
+   "stop = capture/monitoring off, engine idles as clock" semantics — not
+   a JS-side allowlist of start paths.
 4. **Well-known internal holders.** Main-process / engine-internal callers
    use a fixed enum of synthetic ids (`engine:backing-player`,
    `main:startup-restore`, `main:executor`), registered at boot, lifecycle =
