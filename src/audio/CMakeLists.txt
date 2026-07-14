@@ -14,6 +14,11 @@ set(AUDIO_SOURCES
     addon/AddonContext.cpp
     addon/ChainOps.cpp
     addon/EditorWindows.cpp
+    addon/DeviceBindings.cpp
+    addon/ControlBindings.cpp
+    addon/DetectionBindings.cpp
+    addon/ChainBindings.cpp
+    addon/BackingBindings.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp
