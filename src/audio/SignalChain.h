@@ -33,6 +33,10 @@ struct ProcessorSlot
     // Linear output gain applied right after the processor (and pan). Carries
     // the per-amp loudness trim / per-branch level; 1.0 (default) = no-op.
     float postGain = 1.0f;
+    // Polarity flip (Ø), applied with postGain. Lets one amp of a parallel rig
+    // be phase-inverted so two amps whose circuits invert differently (e.g. a
+    // 3-stage vs 4-stage preamp) don't cancel when their branches merge.
+    bool phaseInv = false;
 
     // For VST plugins — their state as base64 for preset save/load
     juce::MemoryBlock getState() const;
@@ -90,6 +94,7 @@ public:
     void setBranch(int slotId, int branch);
     void setBranchSrc(int slotId, int src);
     void setPostGain(int slotId, float gain);
+    void setPhase(int slotId, bool inverted);   // polarity flip (Ø), see slot.phaseInv
     void clear();
 
     // Info

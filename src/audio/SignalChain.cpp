@@ -339,8 +339,11 @@ void SignalChain::processLocked(juce::AudioBuffer<float>& buffer, juce::MidiBuff
                 slotMidi.addEvent(drained[i].msg, 0);
         invokePlugin(*slot, [&](juce::AudioProcessor& p) { p.processBlock(buf, slotMidi); });
         applyPan(buf, numSamples, slot->pan);
-        if (slot->postGain != 1.0f)
-            buf.applyGain(0, numSamples, slot->postGain);
+        // Ø (phaseInv) rides the same multiply as the trim: a -1 factor flips
+        // the slot's polarity (de-phases one amp of a parallel rig).
+        const float post = slot->phaseInv ? -slot->postGain : slot->postGain;
+        if (post != 1.0f)
+            buf.applyGain(0, numSamples, post);
     };
 
     // Fast path: no parallel branch → plain serial chain. Behaviour is unchanged
@@ -676,6 +679,13 @@ void SignalChain::setBranchSrc(int slotId, int src)
     if (idx >= 0) slots[idx]->branchSrc = juce::jlimit(0, 2, src);
 }
 
+void SignalChain::setPhase(int slotId, bool inverted)
+{
+    const juce::ScopedLock sl(lock);
+    int idx = findSlotIndex(slotId);
+    if (idx >= 0) slots[idx]->phaseInv = inverted;
+}
+
 void SignalChain::clear()
 {
     // Detach the slots under a BRIEF lock, then destroy them OFF the lock. The
@@ -791,6 +801,7 @@ juce::String SignalChain::savePreset() const
         // Per-slot output trim (loudness leveling). LoadPresetWorker reads this
         // back, so it must be written here or a save/load round-trip drops it.
         if (slot->postGain != 1.0f)  slotObj->setProperty("postGain", slot->postGain);
+        if (slot->phaseInv)          slotObj->setProperty("phaseInv", true);
 
         // Save processor state as base64
         auto state = slot->getState();

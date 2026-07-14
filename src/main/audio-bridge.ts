@@ -1220,6 +1220,9 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:setBranchSrc', (_event, slotId: number, src: number) => {
         audio?.setBranchSrc?.(slotId, src);
     });
+    ipcMain.handle('audio:setPhase', (_event, slotId: number, inverted: boolean) => {
+        audio?.setPhase?.(slotId, inverted);
+    });
 
     ipcMain.handle('audio:clearChain', () => {
         audio?.clearChain();

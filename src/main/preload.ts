@@ -436,6 +436,7 @@ const feedBackDesktopApi = {
         setBranch: (slotId: number, branch: number) => ipcRenderer.invoke('audio:setBranch', slotId, branch),
         setBranchSrc: (slotId: number, src: number) => ipcRenderer.invoke('audio:setBranchSrc', slotId, src),
         setPostGain: (slotId: number, gain: number) => ipcRenderer.invoke('audio:setPostGain', slotId, gain),
+        setPhase: (slotId: number, inverted: boolean) => ipcRenderer.invoke('audio:setPhase', slotId, inverted),
         clearChain: () => ipcRenderer.invoke('audio:clearChain'),
         getChainState: () => ipcRenderer.invoke('audio:getChainState'),
 
