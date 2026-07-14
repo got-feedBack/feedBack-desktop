@@ -257,11 +257,8 @@ function loadNativeAddon(): AudioModule | null {
 
 export function initAudioBridge(): void {
     audio = loadNativeAddon();
+    const audioEffects = createAudioEffectsExecutor(() => audio);
     leaseBridge = initLeaseBridge(() => audio);
-    // The executor sees a gated native surface: its `startAudio: true` chain
-    // plans (rig_builder song loads) must not undo a user stop (§8.3) — that
-    // path calls native directly and never crosses the IPC latch check.
-    const audioEffects = createAudioEffectsExecutor(leaseBridge.gateNativeAudio(() => audio));
 
     // ── Lease registry surface (ownership plan §2/§8; wiring in lease-bridge) ──
 

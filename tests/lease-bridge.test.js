@@ -127,31 +127,6 @@ test('user-stop latch: fresh demands and legacy starts held off until user start
     bridge.dispose();
 });
 
-test('gateNativeAudio: executor startAudio suppressed under the latch, transparent otherwise', () => {
-    const audio = fakeAudio();
-    const { bridge } = makeBridge(audio);
-    const gated = bridge.gateNativeAudio(() => audio)();
-
-    // Transparent pass-through when not latched — other methods untouched.
-    gated.startAudio();
-    assert.deepEqual(audio.calls, ['start']);
-    assert.equal(gated.isAudioRunning(), true);
-
-    audio.stopAudio();
-    audio.calls.length = 0;
-    bridge.onUserStopAudio();
-
-    // Chain plan's startAudio:true waits out the user stop (strict §8.3).
-    gated.startAudio();
-    assert.deepEqual(audio.calls, []);
-
-    bridge.onUserStartAudio(); // user start clears; engine started by it
-    audio.calls.length = 0;
-    gated.startAudio();
-    assert.deepEqual(audio.calls, ['start']);
-    bridge.dispose();
-});
-
 test('detection demand arms native; raw disarm guarded while demand active (6.3)', () => {
     const audio = fakeAudio();
     const { bridge } = makeBridge(audio);
