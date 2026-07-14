@@ -4390,16 +4390,27 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     function aeSetMonitorMuteSuppressed(suppressed) {
         const want = !!suppressed;
         if (want === aeMonitorMuteSuppressionHeld) return;   // idempotent, like the old bool
-        aeMonitorMuteSuppressionHeld = want;
         const api = window.feedBackDesktop?.audio;
-        // Optional-chained: a downlevel native addon simply ignores this.
+        // Downlevel addon (no arbiter): nothing is ever acquired, so leave the
+        // latch alone rather than recording a hold we don't have.
+        if (typeof api?.setMonitorMuteSuppressed !== 'function') return;
+        aeMonitorMuteSuppressionHeld = want;
+        // The latch mirrors the NATIVE refcount, so it may only stay flipped if
+        // the call actually landed. A rejected release that left the latch at
+        // "released" would short-circuit every later release while the native
+        // count stayed held — the same stuck-suppression bug, one level up. Roll
+        // back on failure so the next call retries (and only if no newer call
+        // has moved the latch on in the meantime).
+        const rollback = () => {
+            if (aeMonitorMuteSuppressionHeld === want) aeMonitorMuteSuppressionHeld = !want;
+        };
         // setMonitorMuteSuppressed is async (ipcRenderer.invoke) — the sync
-        // try/catch only covers a missing method, so also swallow the
-        // returned promise's rejection to avoid an unhandled rejection.
+        // try/catch only covers a throwing call, so handle the returned
+        // promise's rejection too (which also avoids an unhandled rejection).
         try {
-            const r = api?.setMonitorMuteSuppressed?.(want);
-            if (r && typeof r.catch === 'function') r.catch(() => {});
-        } catch (_) { /* downlevel */ }
+            const r = api.setMonitorMuteSuppressed(want);
+            if (r && typeof r.catch === 'function') r.catch(rollback);
+        } catch (_) { rollback(); }
     }
     // Called by clearChainForNewSong (IIFE 1) and the preload below.
     window._aeBeginChainRebuildGuard = function () { aeSetMonitorMuteSuppressed(true); };
