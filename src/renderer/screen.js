@@ -395,6 +395,37 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         return { outcome: 'handled', status: 'closed' };
     }
 
+    // Keep the audio-session capability's persisted input selection
+    // (feedBack.audioInput.selectedLogicalSourceKey) in lockstep with the
+    // device the user applies here. Without this, a stale stored selection
+    // (e.g. an old virtual mic) survives a settings change, and the next
+    // plugin that opens the "selected input" (tuner/note_detect on song
+    // start) calls audioInputOpenHandler with the stale key — clobbering
+    // the engine back to the dead device mid-session.
+    function syncSelectedInputSource(inputType, inputDevice) {
+        const realName = String(inputDevice || '').trim();
+        const key = realName
+            ? `desktop-audio:${safeKeyPart(inputType)}:input:name:${encodeURIComponent(realName)}`
+            : '';
+        const audioSession = window.slopsmith && window.slopsmith.audioSession;
+        if (key && audioSession && typeof audioSession.selectInputSource === 'function') {
+            try {
+                const res = audioSession.selectInputSource({ logicalSourceKey: key }, 'audio_engine');
+                if (res && res.outcome === 'handled') return;
+            } catch (e) {
+                console.warn('[audio-engine] selectInputSource sync failed:', e);
+            }
+        }
+        // The capability isn't loaded (or the source isn't registered yet) —
+        // rewrite the persisted key directly so the stale selection still
+        // can't clobber the device at the next open. A nameless device has
+        // no stable key, so invalidate rather than guess.
+        try {
+            if (key) window.localStorage.setItem('feedBack.audioInput.selectedLogicalSourceKey', key);
+            else window.localStorage.removeItem('feedBack.audioInput.selectedLogicalSourceKey');
+        } catch (_) { /* storage unavailable — nothing to invalidate */ }
+    }
+
     function registerAudioSessionInputSources() {
         const audioSession = window.slopsmith && window.slopsmith.audioSession;
         if (!audioSession || typeof audioSession.registerInputSource !== 'function') return;
@@ -975,6 +1006,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     aeApplyNoiseGateToEngine();
                     rememberAppliedDeviceSettings();
                     aeApplyTonePolishToEngine();
+                    // Converge a stale capability-side selection to the saved
+                    // device on startup too — not just on a manual re-apply.
+                    syncSelectedInputSource(deviceTypeSelect.value, inputDeviceSelect.value);
                 }
             }
         }
@@ -1617,6 +1651,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 statusText.textContent = 'Audio running' + modeLabel;
                 aeApplyNoiseGateToEngine();
                 aeApplyTonePolishToEngine();
+                syncSelectedInputSource(inputType, inputDeviceSelect.value);
                 const applied = rememberAppliedDeviceSettings();
                 await saveDeviceSettings(applied);
             } else {
