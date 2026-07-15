@@ -360,6 +360,26 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             return { outcome: 'failed', status: 'failed', reason: 'No input device selected' };
         }
 
+        // If the engine is already running with exactly the requested input,
+        // don't tear it down just to rebind the same device — a redundant
+        // setDevice stops and restarts the engine mid-session (audible dropout,
+        // "Audio paused unexpectedly" on song start). Compare against what the
+        // engine ACTUALLY has bound, not the Settings dropdowns, so a stale UI
+        // can't fake a match.
+        try {
+            const running = typeof api.isAudioRunning === 'function' ? await api.isAudioRunning() : false;
+            if (running && typeof api.getCurrentDevice === 'function') {
+                const cur = await api.getCurrentDevice();
+                const curType = cur && (cur.inputType || cur.type) ? String(cur.inputType || cur.type) : '';
+                const curInput = cur && cur.input ? String(cur.input) : '';
+                const wantType = typeInfo && typeInfo.name ? String(typeInfo.name) : '';
+                if (curInput && curInput.trim() === String(inputDevice).trim()
+                    && (!wantType || curType === wantType)) {
+                    return { outcome: 'handled', status: 'open', payload: { boundType: curType || wantType, boundName: curInput, requestedName: inputDevice, alreadyBound: true } };
+                }
+            }
+        } catch (_) { /* engine state unreadable — fall through to the normal (re)bind path */ }
+
         const snapshot = currentAudioDeviceSnapshot();
         const result = await api.setDevice({
             inputType: typeInfo && typeInfo.name ? typeInfo.name : snapshot.inputType,
