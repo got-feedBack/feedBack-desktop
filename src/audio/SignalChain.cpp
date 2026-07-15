@@ -712,23 +712,59 @@ juce::Array<const ProcessorSlot*> SignalChain::getAllSlots() const
 juce::Array<SignalChain::ParamInfo> SignalChain::getParameters(int slotId) const
 {
     juce::Array<ParamInfo> result;
-    const juce::ScopedLock sl(lock);
-    int idx = findSlotIndex(slotId);
-    if (idx < 0) return result;
 
-    auto* proc = slots[idx]->processor.get();
-    if (!proc) return result;
-
-    auto& params = proc->getParameters();
-    for (int i = 0; i < params.size(); ++i)
+    // Resolve the processor under the lock, then act on it. For a SANDBOXED
+    // plugin the value read is a blocking control-pipe round-trip, which must
+    // NOT run while holding the audio lock (it would stall processBlock for the
+    // reply timeout), so we drop the lock before the IPC. Slot add/remove and
+    // this getter both run on the host's main thread, so the pointer stays valid
+    // after the lock is released — the same discipline getStateInformation()
+    // relies on for its off-lock kGetState round-trip.
+    slopsmith::sandbox::SandboxedProcessor* sandboxed = nullptr;
     {
-        ParamInfo info;
-        info.index = i;
-        info.name = params[i]->getName(128);
-        info.value = params[i]->getValue();
-        info.label = params[i]->getLabel();
-        info.text = params[i]->getCurrentValueAsText();
-        result.add(info);
+        const juce::ScopedLock sl(lock);
+        int idx = findSlotIndex(slotId);
+        if (idx < 0) return result;
+
+        auto* proc = slots[idx]->processor.get();
+        if (!proc) return result;
+
+        sandboxed = dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(proc);
+        if (sandboxed == nullptr)
+        {
+            // In-process plugin: JUCE parameter proxies are live — read them
+            // directly under the lock (cheap, no IPC).
+            auto& params = proc->getParameters();
+            for (int i = 0; i < params.size(); ++i)
+            {
+                ParamInfo info;
+                info.index = i;
+                info.name = params[i]->getName(128);
+                info.value = params[i]->getValue();
+                info.label = params[i]->getLabel();
+                info.text = params[i]->getCurrentValueAsText();
+                result.add(info);
+            }
+            return result;
+        }
+    }
+
+    // Sandboxed plugin: no host-side JUCE parameter proxies exist, so ask the
+    // subprocess for its live values over the control pipe (off the audio lock).
+    juce::var params = sandboxed->listSandboxedParameters();
+    if (auto* arr = params.getArray())
+    {
+        for (const auto& pv : *arr)
+        {
+            ParamInfo info;
+            info.index = (int) pv.getProperty("index", -1);
+            info.name  = pv.getProperty("name", juce::String()).toString();
+            info.value = (float) (double) pv.getProperty("value", 0.0);
+            info.label = pv.getProperty("label", juce::String()).toString();
+            info.text  = pv.getProperty("text", juce::String()).toString();
+            if (info.index >= 0)
+                result.add(info);
+        }
     }
     return result;
 }

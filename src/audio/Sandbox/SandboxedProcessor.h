@@ -68,6 +68,14 @@ public:
     // Forward a parameter change to the sandboxed plugin over the control pipe.
     void setSandboxedParameter(int index, float value);
 
+    // Snapshot the sandboxed plugin's CURRENT parameter values (a blocking
+    // control-pipe round-trip). Returns the reply's "params" array var — one
+    // object per param: { index, name, value (normalized 0..1), label, text } —
+    // or an empty var on failure. A sandboxed plugin exposes no host-side JUCE
+    // parameter proxies, so this is how the host reads values the user changed in
+    // the plugin's own editor window. Call OFF the audio lock (blocking IPC).
+    juce::var listSandboxedParameters();
+
     // Callback fired when the subprocess unexpectedly exits or its control
     // pipe breaks. Always invoked from a background thread; mutex-guarded
     // so concurrent assignment from the owner thread + read from the I/O
