@@ -219,6 +219,23 @@ if (process.platform === 'linux') {
     }
 }
 
+// A failing GPU must degrade, not kill the app.
+//
+// When the GPU process can't launch or keeps crashing, Chromium's default is to
+// give up and FATAL-abort the whole browser process — the user sees the app
+// vanish ("GPU process isn't usable. Goodbye." / gpu_data_manager_impl_private
+// .cc). We hit exactly this: a machine with a flaky GPU stack (bad driver, a
+// headless/VM session, a transient reset) took the app down mid-song, and it is
+// the likely reason behind the "gig always defaults to the classic 2D highway"
+// reports — those machines are one GPU hiccup away from a crash, not just a
+// fallback. Disabling the crash LIMIT tells Chromium to keep the browser alive
+// and fall back to software rendering instead of aborting. The 3D highway then
+// degrades to the 2D one (or runs slow under SwiftShader), which is a far better
+// outcome than the whole app dying. Set before app.whenReady() so Chromium
+// reads it during init. Software rasterization stays enabled (we never pass
+// --disable-software-rasterizer), so the fallback path exists to land on.
+app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
+
 if (process.platform === 'win32') {
     // Pin the WebGL/GPU process to the discrete (high-performance) adapter on
     // hybrid-GPU machines. On Windows laptops with an Intel iGPU + NVIDIA/AMD
@@ -1374,6 +1391,29 @@ if (!hasSingleInstanceLock) {
     }
     app.whenReady().then(startup);
 }
+
+// Surface GPU / utility subprocess failures instead of letting them vanish
+// silently. Paired with --disable-gpu-process-crash-limit above: the app now
+// SURVIVES a dead GPU process (falling back to software rendering), so the only
+// remaining signal that it happened is this log — which is what a "the highway
+// is 2D / the app was crashing" report needs to be diagnosable. `child-process-
+// gone` covers the GPU and utility processes; `render-process-gone` is the
+// renderer itself. Log-only: none of these should tear the app down.
+app.on('child-process-gone', (_event, details) => {
+    if (details.type === 'GPU' || details.reason !== 'clean-exit') {
+        console.warn(
+            `[gpu] ${details.type} process gone: reason=${details.reason}`
+            + (details.exitCode != null ? ` exitCode=${details.exitCode}` : '')
+            + (details.type === 'GPU'
+                ? ' — the app stays up on software rendering (the 3D highway degrades to 2D).'
+                : ''),
+        );
+    }
+});
+app.on('render-process-gone', (_event, _wc, details) => {
+    console.warn(`[renderer] render process gone: reason=${details.reason}`
+        + (details.exitCode != null ? ` exitCode=${details.exitCode}` : ''));
+});
 
 app.on('window-all-closed', () => {
     shutdown();
