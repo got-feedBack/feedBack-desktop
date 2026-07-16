@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <string>
 
 namespace slopsmith::addon {
@@ -506,7 +507,14 @@ Napi::Value AddSource(const Napi::CallbackInfo& info)
         const int k = info[1].As<Napi::Number>().Int32Value();
         if (k >= 0) deviceKey = k;  // negatives ignored → primary
     }
-    return Napi::Number::New(env, liveEngine->addSource(channel, deviceKey));
+    // deviceKey != 0 opens an extra input AudioIODevice — device lifecycle,
+    // so it must run on the JUCE message thread (see runDeviceLifecycleOp).
+    auto sourceId = std::make_shared<int>(-1);
+    if (!runDeviceLifecycleOp([liveEngine, channel, deviceKey, sourceId] {
+            *sourceId = liveEngine->addSource(channel, deviceKey);
+        }))
+        return Napi::Number::New(env, -1);
+    return Napi::Number::New(env, *sourceId);
 }
 
 // removeSource(sourceId) -> boolean. sources[0] cannot be removed.
@@ -516,7 +524,15 @@ Napi::Value RemoveSource(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (!liveEngine || info.Length() < 1 || !info[0].IsNumber())
         return Napi::Boolean::New(env, false);
-    return Napi::Boolean::New(env, liveEngine->removeSource(info[0].As<Napi::Number>().Int32Value()));
+    // May close the source's extra input AudioIODevice — message thread hop
+    // for the same reason as AddSource.
+    const int sourceId = info[0].As<Napi::Number>().Int32Value();
+    auto removed = std::make_shared<bool>(false);
+    if (!runDeviceLifecycleOp([liveEngine, sourceId, removed] {
+            *removed = liveEngine->removeSource(sourceId);
+        }))
+        return Napi::Boolean::New(env, false);
+    return Napi::Boolean::New(env, *removed);
 }
 
 // listSources() -> [{ id, inputChannel, active }]. Null on a missing engine.
@@ -572,7 +588,14 @@ Napi::Value BindInputDevice(const Napi::CallbackInfo& info)
         return Napi::String::New(env, "bindInputDevice(deviceKey:number, deviceName:string)");
     const int deviceKey = info[0].As<Napi::Number>().Int32Value();
     const std::string name = info[1].As<Napi::String>().Utf8Value();
-    return Napi::String::New(env, liveEngine->bindInputDevice(deviceKey, name).toStdString());
+    // Opens a physical AudioIODevice — message thread hop (runDeviceLifecycleOp).
+    auto err = std::make_shared<juce::String>();
+    if (!runDeviceLifecycleOp([liveEngine, deviceKey, name, err] {
+            *err = liveEngine->bindInputDevice(deviceKey, name);
+        }))
+        return Napi::String::New(env,
+            "bindInputDevice did not complete (message thread unavailable or timed out)");
+    return Napi::String::New(env, err->toStdString());
 }
 
 // unbindInputDevice(deviceKey) -> boolean. Stops + releases the extra device.
@@ -582,7 +605,14 @@ Napi::Value UnbindInputDevice(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (!liveEngine || info.Length() < 1 || !info[0].IsNumber())
         return Napi::Boolean::New(env, false);
-    return Napi::Boolean::New(env, liveEngine->unbindInputDevice(info[0].As<Napi::Number>().Int32Value()));
+    // Closes a physical AudioIODevice — message thread hop (runDeviceLifecycleOp).
+    const int deviceKey = info[0].As<Napi::Number>().Int32Value();
+    auto unbound = std::make_shared<bool>(false);
+    if (!runDeviceLifecycleOp([liveEngine, deviceKey, unbound] {
+            *unbound = liveEngine->unbindInputDevice(deviceKey);
+        }))
+        return Napi::Boolean::New(env, false);
+    return Napi::Boolean::New(env, *unbound);
 }
 
 

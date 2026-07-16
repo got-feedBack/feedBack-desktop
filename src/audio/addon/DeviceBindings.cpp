@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <string>
 
 namespace slopsmith::addon {
@@ -125,9 +126,24 @@ Napi::Value ProbeDeviceOptions(const Napi::CallbackInfo& info)
         return obj;
     }
 
-    auto options = liveEngine->probeDeviceOptionsDual(
-        juce::String(inputType), juce::String(inputName),
-        juce::String(outputType), juce::String(outputName));
+    // Probing constructs + destroys short-lived ASIO device objects
+    // (DeviceSetup::probeDual / rateSupportedBy createDevice) — same
+    // create/destroy-off-the-message-thread pattern as the lifecycle ops, so
+    // it takes the same hop (PR #113 review finding 1). Query-only (never
+    // open()), but a probe ASIOAudioIODevice owns the same reset-timer
+    // machinery as the live one.
+    auto optionsPtr = std::make_shared<AudioEngine::DeviceOptions>();
+    if (!runDeviceLifecycleOp([liveEngine, inputType, inputName, outputType, outputName, optionsPtr] {
+            *optionsPtr = liveEngine->probeDeviceOptionsDual(
+                juce::String(inputType), juce::String(inputName),
+                juce::String(outputType), juce::String(outputName));
+        }))
+    {
+        obj.Set("error", "device probe did not complete (message thread unavailable or timed out)");
+        obj.Set("compatible", false);
+        return obj;
+    }
+    const auto& options = *optionsPtr;
     obj.Set("type", options.inputType.toStdString());      // legacy alias
     obj.Set("inputType", options.inputType.toStdString());
     obj.Set("outputType", options.outputType.toStdString());
@@ -215,8 +231,12 @@ Napi::Value SetDeviceType(const Napi::CallbackInfo& info)
         return Napi::Boolean::New(env, false);
 
     auto typeName = info[0].As<Napi::String>().Utf8Value();
-    bool result = liveEngine->setDeviceType(juce::String(typeName));
-    return Napi::Boolean::New(env, result);
+    auto result = std::make_shared<bool>(false);
+    if (!runDeviceLifecycleOp([liveEngine, typeName, result] {
+            *result = liveEngine->setDeviceType(juce::String(typeName));
+        }))
+        return Napi::Boolean::New(env, false);
+    return Napi::Boolean::New(env, *result);
 }
 
 Napi::Value SetOutputDeviceType(const Napi::CallbackInfo& info)
@@ -226,7 +246,12 @@ Napi::Value SetOutputDeviceType(const Napi::CallbackInfo& info)
     if (!liveEngine || info.Length() < 1 || !info[0].IsString())
         return Napi::Boolean::New(env, false);
     auto typeName = info[0].As<Napi::String>().Utf8Value();
-    return Napi::Boolean::New(env, liveEngine->setOutputDeviceType(juce::String(typeName)));
+    auto result = std::make_shared<bool>(false);
+    if (!runDeviceLifecycleOp([liveEngine, typeName, result] {
+            *result = liveEngine->setOutputDeviceType(juce::String(typeName));
+        }))
+        return Napi::Boolean::New(env, false);
+    return Napi::Boolean::New(env, *result);
 }
 
 Napi::Value SetDevice(const Napi::CallbackInfo& info)
@@ -299,7 +324,15 @@ Napi::Value SetDevice(const Napi::CallbackInfo& info)
     }
 
     // Main thread only — JUCE's ALSA backend deadlocks if called from a worker.
-    const auto r = liveEngine->setAudioDevices(cfg);
+    // On Windows this hops to the JUCE message thread (runDeviceLifecycleOp)
+    // so device destruction can't race the ASIO reset/device-change timers.
+    auto res = std::make_shared<AudioEngine::DeviceConfigResult>();
+    if (!runDeviceLifecycleOp([liveEngine, cfg, res] { *res = liveEngine->setAudioDevices(cfg); }))
+    {
+        result.Set("error", "device reconfigure did not complete (message thread unavailable or timed out)");
+        return result;
+    }
+    const auto& r = *res;
     result.Set("ok", r.ok);
     result.Set("duplex", r.duplex);
     result.Set("sampleRate", r.sampleRate);
@@ -313,13 +346,15 @@ Napi::Value SetDevice(const Napi::CallbackInfo& info)
 
 Napi::Value StartAudio(const Napi::CallbackInfo& info)
 {
-    if (auto liveEngine = snapshotEngine()) liveEngine->startAudio();
+    if (auto liveEngine = snapshotEngine())
+        runDeviceLifecycleOp([liveEngine] { liveEngine->startAudio(); });
     return info.Env().Undefined();
 }
 
 Napi::Value StopAudio(const Napi::CallbackInfo& info)
 {
-    if (auto liveEngine = snapshotEngine()) liveEngine->stopAudio();
+    if (auto liveEngine = snapshotEngine())
+        runDeviceLifecycleOp([liveEngine] { liveEngine->stopAudio(); });
     return info.Env().Undefined();
 }
 
@@ -340,15 +375,21 @@ Napi::Value SetStreamOutputDevice(const Napi::CallbackInfo& info)
         return Napi::String::New(env, "setStreamOutputDevice(typeName:string, deviceName:string)");
     const std::string typeName = info[0].As<Napi::String>().Utf8Value();
     const std::string devName  = info[1].As<Napi::String>().Utf8Value();
-    return Napi::String::New(env,
-        liveEngine->setStreamOutputDevice(juce::String(typeName), juce::String(devName)).toStdString());
+    auto err = std::make_shared<juce::String>();
+    if (!runDeviceLifecycleOp([liveEngine, typeName, devName, err] {
+            *err = liveEngine->setStreamOutputDevice(juce::String(typeName), juce::String(devName));
+        }))
+        return Napi::String::New(env,
+            "stream output open did not complete (message thread unavailable or timed out)");
+    return Napi::String::New(env, err->toStdString());
 }
 
 // clearStreamOutput() -> undefined
 Napi::Value ClearStreamOutput(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();
-    if (liveEngine) liveEngine->clearStreamOutput();
+    if (liveEngine)
+        runDeviceLifecycleOp([liveEngine] { liveEngine->clearStreamOutput(); });
     return info.Env().Undefined();
 }
 
