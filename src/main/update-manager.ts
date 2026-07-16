@@ -92,7 +92,7 @@ export type UpdateStatus =
     | { status: 'unsupported'; platform: 'linux' }
     | { status: 'idle'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null }
     | { status: 'checking'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null }
-    | { status: 'downloading'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null; pending: { version: string } }
+    | { status: 'downloading'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null; pending: { version: string }; percent: number | null }
     | { status: 'downloaded'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null; pending: { version: string } }
     | { status: 'error'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null; message: string };
 
@@ -123,6 +123,11 @@ let linuxInFlightCheck: Promise<UpdateStatus> | null = null;
 // release and reports idle. Survives channel round-trips (stable↔nightly) so
 // the staged-update UI is restored when returning to nightly.
 let linuxDownloadedSha: string | null = null;
+// The background AppImage download promise (null when none running) + the
+// latest whole-percent progress, so getStatus() can report progress to a
+// renderer that (re)loads the panel mid-download, not just live listeners.
+let linuxDownloadInFlight: Promise<void> | null = null;
+let downloadPercent: number | null = null;
 // Generation counter: incremented every time setChannel() replaces velopackUm
 // so that in-flight checks from the old channel can detect they are stale and
 // skip all state mutations + broadcasts. Without this, a check running on the
@@ -211,11 +216,71 @@ function readBakedSha(): string | null {
     }
 }
 
+// Download the nightly AppImage in the background and swap it in. Kicked off
+// by checkNowLinux() AFTER it has already returned the 'downloading' status,
+// so the renderer's "Check" button never blocks on the ~1.5GB fetch — it
+// shows "update available" immediately and then live progress. Guards against
+// overlapping downloads (a second check while one is running is a no-op here).
+function startLinuxDownload(url: string, appImagePath: string, remoteSha: string, shortSha: string, myGeneration: number): void {
+    if (linuxDownloadInFlight) return;
+    linuxDownloadInFlight = (async (): Promise<void> => {
+        try {
+            const dl = await fetch(url);
+            if (!dl.ok || !dl.body) {
+                throw new Error(`Download failed: HTTP ${dl.status}`);
+            }
+            // Stream to disk rather than buffering the whole ~1.5GB AppImage in
+            // memory. Download next to the running AppImage so the rename below
+            // stays on the same filesystem (required for it to be atomic).
+            const tmpPath = `${appImagePath}.new`;
+            const total = Number(dl.headers.get('content-length')) || 0;
+            let received = 0;
+            let lastPercent = -1;
+            const body = Readable.fromWeb(dl.body as Parameters<typeof Readable.fromWeb>[0]);
+            body.on('data', (chunk: Buffer) => {
+                received += chunk.length;
+                if (!total) return;
+                const percent = Math.floor((received / total) * 100);
+                // Broadcast only on whole-percent changes so we don't flood the
+                // renderer with an event per chunk.
+                if (percent !== lastPercent) {
+                    lastPercent = percent;
+                    downloadPercent = percent;
+                    broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent, channel: currentChannel });
+                }
+            });
+            await pipeline(body, fs.createWriteStream(tmpPath));
+            fs.chmodSync(tmpPath, 0o755);
+            fs.renameSync(tmpPath, appImagePath);
+            linuxDownloadedSha = remoteSha;
+
+            if (checkGeneration !== myGeneration) return;
+            pendingDownloaded = { version: shortSha };
+            activeState = 'downloaded';
+            downloadPercent = null;
+            broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
+        } catch (err) {
+            if (checkGeneration !== myGeneration) return;
+            const message = err instanceof Error ? err.message : String(err);
+            console.error('[update-manager] Linux download failed:', message);
+            lastError = message;
+            activeState = 'error';
+            downloadPercent = null;
+        } finally {
+            linuxDownloadInFlight = null;
+        }
+    })();
+}
+
 async function checkNowLinux(): Promise<UpdateStatus> {
     const appImagePath = process.env.APPIMAGE;
     if (!appImagePath || currentChannel !== 'nightly') {
         return { status: 'unsupported', platform: 'linux' };
     }
+    // A download already running means we've already found + reported the
+    // update; just report the current (downloading) state without a redundant
+    // metadata round-trip.
+    if (linuxDownloadInFlight) return getStatus();
     if (linuxInFlightCheck) {
         return linuxInFlightCheck;
     }
@@ -245,6 +310,7 @@ async function checkNowLinux(): Promise<UpdateStatus> {
                 activeState = 'idle';
                 pendingVersion = null;
                 pendingDownloaded = null;
+                downloadPercent = null;
                 return getStatus();
             }
             // Already downloaded + staged this same nightly this session; keep
@@ -253,47 +319,21 @@ async function checkNowLinux(): Promise<UpdateStatus> {
                 pendingVersion = shortSha;
                 pendingDownloaded = { version: shortSha };
                 activeState = 'downloaded';
+                downloadPercent = null;
                 return getStatus();
             }
 
-            // decision === 'download': running build differs from the
-            // published nightly and isn't staged yet → fetch it.
+            // decision === 'download': an update is available. Report it
+            // immediately (status 'downloading', percent 0) and kick the actual
+            // fetch off in the background — the renderer must not block on a
+            // multi-minute ~1.5GB download.
             pendingVersion = shortSha;
             activeState = 'downloading';
+            downloadPercent = 0;
             broadcast(IPC_UPDATE_EVENT_AVAILABLE, { version: shortSha, channel: currentChannel });
-
-            const dl = await fetch(asset.browser_download_url);
-            if (!dl.ok || !dl.body) {
-                throw new Error(`Download failed: HTTP ${dl.status}`);
-            }
-            // Stream to disk rather than buffering the whole ~1.5GB AppImage in
-            // memory. Download next to the running AppImage so the rename below
-            // stays on the same filesystem (required for it to be atomic).
-            const tmpPath = `${appImagePath}.new`;
-            const total = Number(dl.headers.get('content-length')) || 0;
-            let received = 0;
-            let lastPercent = -1;
-            const body = Readable.fromWeb(dl.body as Parameters<typeof Readable.fromWeb>[0]);
-            body.on('data', (chunk: Buffer) => {
-                received += chunk.length;
-                if (!total) return;
-                const percent = Math.floor((received / total) * 100);
-                // Broadcast only on whole-percent changes so we don't flood the
-                // renderer with an event per chunk.
-                if (percent !== lastPercent) {
-                    lastPercent = percent;
-                    broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent, channel: currentChannel });
-                }
-            });
-            await pipeline(body, fs.createWriteStream(tmpPath));
-            fs.chmodSync(tmpPath, 0o755);
-            fs.renameSync(tmpPath, appImagePath);
-            linuxDownloadedSha = remoteSha;
-
-            if (checkGeneration !== myGeneration) return getStatus();
-            pendingDownloaded = { version: shortSha };
-            activeState = 'downloaded';
-            broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
+            broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent: 0, channel: currentChannel });
+            startLinuxDownload(asset.browser_download_url, appImagePath, remoteSha, shortSha, myGeneration);
+            return getStatus();
         } catch (err) {
             if (checkGeneration !== myGeneration) return getStatus();
             const message = err instanceof Error ? err.message : String(err);
@@ -374,6 +414,7 @@ export function setChannel(channel: UpdateChannel): void {
     currentChannel = channel;
     pendingVersion = null;
     pendingDownloaded = null;
+    downloadPercent = null;
     // Reset lastChecked too: until the immediate checkNow() below completes,
     // getStatus() should not report a stale "last checked" time that belongs
     // to the previous channel's feed.
@@ -622,6 +663,9 @@ export function getStatus(): UpdateStatus {
                 // can show the target version even before the download completes
                 // and pendingDownloaded is populated.
                 pending: { version: pendingVersion ?? '' },
+                // Non-null only on Linux (Velopack doesn't report a percentage);
+                // lets a panel that loads mid-download show progress immediately.
+                percent: downloadPercent,
             };
         case 'downloaded':
             return {
