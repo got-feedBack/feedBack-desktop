@@ -26,13 +26,19 @@
 //     is — not needed for the current Linux use case, so left unsupported).
 //   - The AppImage filename and app.getVersion() never change between
 //     nightly builds (only win/mac get a date-stamped Velopack version), so
-//     semver comparison can't detect a new nightly. Instead we compare the
-//     GitHub release's `target_commitish` (the commit SHA the nightly was
-//     cut from, which does change nightly) against the SHA we last applied,
-//     persisted in userData/linux-update-state.json.
-//   - On a SHA change we download the `*.AppImage` asset next to the running
-//     AppImage (process.env.APPIMAGE, set by the AppImage runtime) and
-//     rename it over the original — same filesystem, so the rename is
+//     semver comparison can't detect a new nightly. Instead the build bakes
+//     its source commit into dist/main/build-info.json (see build-common.sh);
+//     we compare that baked SHA against the GitHub release's
+//     `target_commitish` (the commit the latest nightly was cut from). A
+//     mismatch means the running build differs from the published nightly →
+//     offer the update. This needs no persistent state: after a swap +
+//     relaunch the new AppImage carries its OWN baked SHA, which now matches
+//     the release, so the next check reports idle. A short-lived in-memory
+//     note (linuxDownloadedSha) stops the 4h poll from re-downloading a
+//     build we've already staged this session.
+//   - On a SHA mismatch we download the `*.AppImage` asset next to the
+//     running AppImage (process.env.APPIMAGE, set by the AppImage runtime)
+//     and rename it over the original — same filesystem, so the rename is
 //     atomic, and Linux allows replacing a file that's currently executing
 //     (the running process keeps its old inode). No separate "apply" step is
 //     needed for the file swap; applyAndRestart() just relaunches the
@@ -70,6 +76,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { UpdateInfo } from 'velopack';
 import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED } from './ipc-channels';
+import { linuxUpdateDecision } from './linux-update-decision';
 
 export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 
@@ -102,6 +109,12 @@ let pollTimer: NodeJS.Timeout | null = null;
 let initialCheckTimer: NodeJS.Timeout | null = null;
 let inFlightCheck: Promise<UpdateInfo | null> | null = null;
 let linuxInFlightCheck: Promise<UpdateStatus> | null = null;
+// The remote nightly SHA we've already downloaded + staged THIS session, so a
+// later poll (remote unchanged) doesn't re-fetch the ~1.5GB AppImage. Not
+// persisted: after a restart the swapped binary's own baked SHA matches the
+// release and reports idle. Survives channel round-trips (stable↔nightly) so
+// the staged-update UI is restored when returning to nightly.
+let linuxDownloadedSha: string | null = null;
 // Generation counter: incremented every time setChannel() replaces velopackUm
 // so that in-flight checks from the old channel can detect they are stale and
 // skip all state mutations + broadcasts. Without this, a check running on the
@@ -172,30 +185,23 @@ function createManager(channel: UpdateChannel): void {
 
 // ── Linux (AppImage) update path ────────────────────────────────────────
 
-type LinuxUpdateState = { sha: string };
+type GithubReleaseAsset = { name: string; browser_download_url: string };
+type GithubRelease = { target_commitish: string; assets: GithubReleaseAsset[] };
 
-function linuxStatePath(): string {
-    return path.join(app.getPath('userData'), 'linux-update-state.json');
-}
-
-function readLinuxState(): LinuxUpdateState | null {
+// The commit this build was cut from, baked into the packaged app by
+// build-common.sh (dist/main/build-info.json, alongside the compiled JS).
+// Returns null for dev/unpackaged builds or an 'unknown' placeholder — the
+// caller then treats the running build as "not the latest nightly" and offers
+// the update, which is the safe default.
+function readBakedSha(): string | null {
     try {
-        return JSON.parse(fs.readFileSync(linuxStatePath(), 'utf8')) as LinuxUpdateState;
+        const raw = fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8');
+        const info = JSON.parse(raw) as { sha?: string };
+        return info.sha && info.sha !== 'unknown' ? info.sha : null;
     } catch {
         return null;
     }
 }
-
-function writeLinuxState(state: LinuxUpdateState): void {
-    try {
-        fs.writeFileSync(linuxStatePath(), JSON.stringify(state));
-    } catch (err) {
-        console.error('[update-manager] Failed to persist Linux update state:', err);
-    }
-}
-
-type GithubReleaseAsset = { name: string; browser_download_url: string };
-type GithubRelease = { target_commitish: string; assets: GithubReleaseAsset[] };
 
 async function checkNowLinux(): Promise<UpdateStatus> {
     const appImagePath = process.env.APPIMAGE;
@@ -222,47 +228,49 @@ async function checkNowLinux(): Promise<UpdateStatus> {
             if (!asset) {
                 throw new Error('No .AppImage asset found in the nightly release');
             }
-            const sha = release.target_commitish;
-            const state = readLinuxState();
-            if (!state || state.sha !== sha) {
-                if (!state) {
-                    // First run since this feature shipped: adopt the current
-                    // nightly's SHA as the baseline rather than immediately
-                    // "discovering" an update for a build the user may have
-                    // just installed.
-                    writeLinuxState({ sha });
-                    activeState = 'idle';
-                    pendingVersion = null;
-                    pendingDownloaded = null;
-                    return getStatus();
-                }
-                const shortSha = sha.slice(0, 7);
-                pendingVersion = shortSha;
-                activeState = 'downloading';
-                broadcast(IPC_UPDATE_EVENT_AVAILABLE, { version: shortSha, channel: currentChannel });
+            const remoteSha = release.target_commitish;
+            const shortSha = remoteSha.slice(0, 7);
+            const decision = linuxUpdateDecision(readBakedSha(), remoteSha, linuxDownloadedSha);
 
-                const dl = await fetch(asset.browser_download_url);
-                if (!dl.ok) {
-                    throw new Error(`Download failed: HTTP ${dl.status}`);
-                }
-                const buf = Buffer.from(await dl.arrayBuffer());
-                // Download next to the running AppImage so the rename below
-                // stays on the same filesystem (required for it to be atomic).
-                const tmpPath = `${appImagePath}.new`;
-                fs.writeFileSync(tmpPath, buf);
-                fs.chmodSync(tmpPath, 0o755);
-                fs.renameSync(tmpPath, appImagePath);
-                writeLinuxState({ sha });
-
-                if (checkGeneration !== myGeneration) return getStatus();
-                pendingDownloaded = { version: shortSha };
-                activeState = 'downloaded';
-                broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
-            } else {
+            // Running build IS the latest nightly — nothing to do.
+            if (decision === 'idle') {
                 activeState = 'idle';
                 pendingVersion = null;
                 pendingDownloaded = null;
+                return getStatus();
             }
+            // Already downloaded + staged this same nightly this session; keep
+            // the pending-restart state rather than re-fetching the AppImage.
+            if (decision === 'staged') {
+                pendingVersion = shortSha;
+                pendingDownloaded = { version: shortSha };
+                activeState = 'downloaded';
+                return getStatus();
+            }
+
+            // decision === 'download': running build differs from the
+            // published nightly and isn't staged yet → fetch it.
+            pendingVersion = shortSha;
+            activeState = 'downloading';
+            broadcast(IPC_UPDATE_EVENT_AVAILABLE, { version: shortSha, channel: currentChannel });
+
+            const dl = await fetch(asset.browser_download_url);
+            if (!dl.ok) {
+                throw new Error(`Download failed: HTTP ${dl.status}`);
+            }
+            const buf = Buffer.from(await dl.arrayBuffer());
+            // Download next to the running AppImage so the rename below stays
+            // on the same filesystem (required for it to be atomic).
+            const tmpPath = `${appImagePath}.new`;
+            fs.writeFileSync(tmpPath, buf);
+            fs.chmodSync(tmpPath, 0o755);
+            fs.renameSync(tmpPath, appImagePath);
+            linuxDownloadedSha = remoteSha;
+
+            if (checkGeneration !== myGeneration) return getStatus();
+            pendingDownloaded = { version: shortSha };
+            activeState = 'downloaded';
+            broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
         } catch (err) {
             if (checkGeneration !== myGeneration) return getStatus();
             const message = err instanceof Error ? err.message : String(err);

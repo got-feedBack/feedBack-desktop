@@ -479,6 +479,17 @@ bundle_soundfont() {
 build_typescript() {
     echo_step "Building TypeScript"
     npm run build:ts
+    # Bake the source commit SHA into the packaged app so the Linux AppImage
+    # updater can tell whether the running build is behind the latest nightly
+    # (whose GitHub release target_commitish is this same commit). In CI
+    # GITHUB_SHA matches the nightly release target exactly; local builds fall
+    # back to the working-tree HEAD — which won't match any nightly, so the
+    # updater simply offers the latest official build. Packaged via the
+    # electron-builder `files: ["dist/**/*"]` glob and read at runtime by
+    # update-manager.ts (path.join(__dirname, 'build-info.json')).
+    local build_sha="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+    node -e "require('fs').writeFileSync('dist/main/build-info.json', JSON.stringify({ sha: process.argv[1] }))" "$build_sha"
+    echo "  Build SHA: $build_sha"
     echo_summary "TypeScript built"
     echo ""
 }
