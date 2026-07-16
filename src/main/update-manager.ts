@@ -74,7 +74,7 @@ import { app, BrowserWindow } from 'electron';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Readable } from 'stream';
+import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import type { UpdateInfo } from 'velopack';
 import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED, IPC_UPDATE_EVENT_PROGRESS } from './ipc-channels';
@@ -236,20 +236,27 @@ function startLinuxDownload(url: string, appImagePath: string, remoteSha: string
             const total = Number(dl.headers.get('content-length')) || 0;
             let received = 0;
             let lastPercent = -1;
-            const body = Readable.fromWeb(dl.body as Parameters<typeof Readable.fromWeb>[0]);
-            body.on('data', (chunk: Buffer) => {
-                received += chunk.length;
-                if (!total) return;
-                const percent = Math.floor((received / total) * 100);
-                // Broadcast only on whole-percent changes so we don't flood the
-                // renderer with an event per chunk.
-                if (percent !== lastPercent) {
-                    lastPercent = percent;
-                    downloadPercent = percent;
-                    broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent, channel: currentChannel });
-                }
+            // Count bytes with a pass-through Transform in the pipeline rather
+            // than a manual 'data' listener on the source: pipeline() then owns
+            // the whole chain's completion + backpressure, so it reliably
+            // resolves at end-of-stream (a stray 'data' listener on the source
+            // can leave the download looking stuck at 100%).
+            const counter = new Transform({
+                transform(chunk: Buffer, _enc, cb) {
+                    received += chunk.length;
+                    if (total) {
+                        const percent = Math.floor((received / total) * 100);
+                        if (percent !== lastPercent) {
+                            lastPercent = percent;
+                            downloadPercent = percent;
+                            broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent, channel: currentChannel });
+                        }
+                    }
+                    cb(null, chunk);
+                },
             });
-            await pipeline(body, fs.createWriteStream(tmpPath));
+            const body = Readable.fromWeb(dl.body as Parameters<typeof Readable.fromWeb>[0]);
+            await pipeline(body, counter, fs.createWriteStream(tmpPath));
             fs.chmodSync(tmpPath, 0o755);
             fs.renameSync(tmpPath, appImagePath);
             linuxDownloadedSha = remoteSha;
