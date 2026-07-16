@@ -18,6 +18,9 @@ export const IPC_UPDATE_APPLY = 'update:apply' as const;
 // update-manager broadcaster and the preload listeners can't drift.
 export const IPC_UPDATE_EVENT_AVAILABLE = 'update:available' as const;
 export const IPC_UPDATE_EVENT_DOWNLOADED = 'update:downloaded' as const;
+// Download-progress ticks (Linux AppImage self-update — a full ~1.5GB fetch,
+// so the renderer needs a percentage rather than a frozen "checking" state).
+export const IPC_UPDATE_EVENT_PROGRESS = 'update:progress' as const;
 
 // Config maintenance — the in-app "Reset / repair configuration" action. The
 // Settings panel reads the enumerated per-OS paths, runs a granular reset, and

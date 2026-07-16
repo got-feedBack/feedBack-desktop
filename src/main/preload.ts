@@ -29,6 +29,7 @@ import {
     IPC_UPDATE_APPLY,
     IPC_UPDATE_EVENT_AVAILABLE,
     IPC_UPDATE_EVENT_DOWNLOADED,
+    IPC_UPDATE_EVENT_PROGRESS,
     IPC_POWER_SET_SCREEN_AWAKE,
     IPC_WINDOW_GET_START_FULLSCREEN,
     IPC_WINDOW_SET_START_FULLSCREEN,
@@ -46,6 +47,7 @@ import {
 export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 export interface UpdateAvailablePayload { version: string; channel: UpdateChannel }
 export interface UpdateDownloadedPayload { version: string; channel: UpdateChannel }
+export interface UpdateProgressPayload { percent: number; channel: UpdateChannel }
 
 // Audio setDevice payload — duplex when input/output types match and device
 // names match (or both empty); split otherwise. NodeAddon validates the
@@ -575,6 +577,11 @@ const feedBackDesktopApi = {
             const listener = (_event: unknown, payload: UpdateDownloadedPayload) => callback(payload);
             ipcRenderer.on(IPC_UPDATE_EVENT_DOWNLOADED, listener);
             return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_DOWNLOADED, listener);
+        },
+        onProgress: (callback: (payload: UpdateProgressPayload) => void) => {
+            const listener = (_event: unknown, payload: UpdateProgressPayload) => callback(payload);
+            ipcRenderer.on(IPC_UPDATE_EVENT_PROGRESS, listener);
+            return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_PROGRESS, listener);
         },
     },
     // Keep the OS display/screensaver awake while a song plays. slopsmith core

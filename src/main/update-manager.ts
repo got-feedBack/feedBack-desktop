@@ -74,9 +74,17 @@ import { app, BrowserWindow } from 'electron';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import type { UpdateInfo } from 'velopack';
-import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED } from './ipc-channels';
+import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED, IPC_UPDATE_EVENT_PROGRESS } from './ipc-channels';
 import { linuxUpdateDecision } from './linux-update-decision';
+
+// Abort the small metadata request if GitHub stalls, so a dead connection
+// surfaces as an error instead of a frozen "checking" state forever. The
+// large AppImage download deliberately has no such deadline — it can legitimately
+// run for minutes; its progress broadcasts are what reveal a stall there.
+const METADATA_FETCH_TIMEOUT_MS = 30_000;
 
 export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 
@@ -215,7 +223,7 @@ async function checkNowLinux(): Promise<UpdateStatus> {
     activeState = 'checking';
     const run = (async (): Promise<UpdateStatus> => {
         try {
-            const res = await fetch(GITHUB_NIGHTLY_RELEASE_API);
+            const res = await fetch(GITHUB_NIGHTLY_RELEASE_API, { signal: AbortSignal.timeout(METADATA_FETCH_TIMEOUT_MS) });
             if (!res.ok) {
                 throw new Error(`GitHub API returned ${res.status}`);
             }
@@ -255,14 +263,29 @@ async function checkNowLinux(): Promise<UpdateStatus> {
             broadcast(IPC_UPDATE_EVENT_AVAILABLE, { version: shortSha, channel: currentChannel });
 
             const dl = await fetch(asset.browser_download_url);
-            if (!dl.ok) {
+            if (!dl.ok || !dl.body) {
                 throw new Error(`Download failed: HTTP ${dl.status}`);
             }
-            const buf = Buffer.from(await dl.arrayBuffer());
-            // Download next to the running AppImage so the rename below stays
-            // on the same filesystem (required for it to be atomic).
+            // Stream to disk rather than buffering the whole ~1.5GB AppImage in
+            // memory. Download next to the running AppImage so the rename below
+            // stays on the same filesystem (required for it to be atomic).
             const tmpPath = `${appImagePath}.new`;
-            fs.writeFileSync(tmpPath, buf);
+            const total = Number(dl.headers.get('content-length')) || 0;
+            let received = 0;
+            let lastPercent = -1;
+            const body = Readable.fromWeb(dl.body as Parameters<typeof Readable.fromWeb>[0]);
+            body.on('data', (chunk: Buffer) => {
+                received += chunk.length;
+                if (!total) return;
+                const percent = Math.floor((received / total) * 100);
+                // Broadcast only on whole-percent changes so we don't flood the
+                // renderer with an event per chunk.
+                if (percent !== lastPercent) {
+                    lastPercent = percent;
+                    broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent, channel: currentChannel });
+                }
+            });
+            await pipeline(body, fs.createWriteStream(tmpPath));
             fs.chmodSync(tmpPath, 0o755);
             fs.renameSync(tmpPath, appImagePath);
             linuxDownloadedSha = remoteSha;
