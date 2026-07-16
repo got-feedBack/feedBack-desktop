@@ -1,6 +1,8 @@
-// Velopack-backed auto-updater for Slopsmith Desktop (Windows + macOS).
+// Auto-updater for fee[dB]ack Desktop. Windows + macOS go through Velopack;
+// Linux (AppImage only) goes through a home-grown GitHub-releases checker,
+// since Velopack has no Linux support.
 //
-// Architecture:
+// Architecture (Windows/macOS — Velopack):
 //   - The renderer persists the user's release channel in localStorage and
 //     calls setChannel() on boot so this module's UpdateManager is bound to
 //     the right feed (stable | rc | beta | alpha | nightly). The nightly feed
@@ -12,10 +14,32 @@
 //     update:available immediately and update:downloaded once the .nupkg is
 //     on disk. The renderer shows a banner whose "Restart to apply" button
 //     funnels back into applyAndRestart().
-//   - Linux has no Velopack pipeline (electron-builder AppImage/.deb only),
-//     so every method short-circuits to { status: "unsupported", ... } and
-//     never touches the SDK. The renderer can still render the channel
-//     dropdown — it just gets a clear "not supported here" status back.
+//
+// Architecture (Linux — AppImage):
+//   - electron-builder ships the nightly Linux build as a plain AppImage
+//     (release/*.AppImage), uploaded to the same rolling `nightly` GitHub
+//     Release as the Velopack win/mac feed — but with no Velopack manifest,
+//     so there's nothing for the Velopack SDK to read on this platform.
+//   - Only the `nightly` channel is supported (stable/rc/beta/alpha are
+//     one-off tagged releases, not a rolling release, so "find the newest
+//     matching tag" isn't a single API call the way `releases/tags/nightly`
+//     is — not needed for the current Linux use case, so left unsupported).
+//   - The AppImage filename and app.getVersion() never change between
+//     nightly builds (only win/mac get a date-stamped Velopack version), so
+//     semver comparison can't detect a new nightly. Instead we compare the
+//     GitHub release's `target_commitish` (the commit SHA the nightly was
+//     cut from, which does change nightly) against the SHA we last applied,
+//     persisted in userData/linux-update-state.json.
+//   - On a SHA change we download the `*.AppImage` asset next to the running
+//     AppImage (process.env.APPIMAGE, set by the AppImage runtime) and
+//     rename it over the original — same filesystem, so the rename is
+//     atomic, and Linux allows replacing a file that's currently executing
+//     (the running process keeps its old inode). No separate "apply" step is
+//     needed for the file swap; applyAndRestart() just relaunches the
+//     (already-replaced) AppImage and quits this process.
+//   - If the AppImage isn't running as an AppImage (process.env.APPIMAGE
+//     unset — e.g. a .deb install or an unpackaged dev build) or the channel
+//     isn't `nightly`, every method reports { status: "unsupported" }.
 //
 // Velopack JS SDK API notes (verified against
 //   node_modules/velopack/lib/index.d.ts, package 0.0.1589-ga2c5a97,
@@ -41,6 +65,9 @@
 //     (releases.<channel>.json), not by GitHub prerelease flag.
 
 import { app, BrowserWindow } from 'electron';
+import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { UpdateInfo } from 'velopack';
 import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED } from './ipc-channels';
 
@@ -54,15 +81,17 @@ export type UpdateStatus =
     | { status: 'downloaded'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null; pending: { version: string } }
     | { status: 'error'; channel: UpdateChannel; currentVersion: string | null; lastChecked: number | null; message: string };
 
-// Repo the Velopack feed lives in. Matches the existing electron-builder
-// release pipeline (got-feedback/feedback-desktop) — Velopack's GitHub
-// loader looks for `releases.<channel>.json` + `*-full.nupkg` / `*-delta.nupkg`
-// assets attached to releases here.
+// Repo the Velopack feed (win/mac) and the Linux nightly release both live
+// in. Matches the existing electron-builder release pipeline.
 const FEED_URL = 'https://github.com/got-feedback/feedback-desktop';
 
-// Background poll cadence. Velopack downloads are cheap when there's nothing
-// new (HEAD on the channel manifest), so 4h is a reasonable trade-off
-// between freshness and noise on the user's network.
+// GitHub REST API URL for the rolling nightly release. Public repo, no auth
+// needed. Only used on Linux.
+const GITHUB_NIGHTLY_RELEASE_API = FEED_URL.replace('https://github.com/', 'https://api.github.com/repos/') + '/releases/tags/nightly';
+
+// Background poll cadence. Cheap on both platforms (Velopack HEADs the
+// channel manifest; the Linux path is a single small GitHub API GET), so 4h
+// is a reasonable trade-off between freshness and noise on the user's network.
 const POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 // Held in module scope (singleton) — `main.ts` calls `init()` once after
@@ -72,6 +101,7 @@ let currentChannel: UpdateChannel = 'stable';
 let pollTimer: NodeJS.Timeout | null = null;
 let initialCheckTimer: NodeJS.Timeout | null = null;
 let inFlightCheck: Promise<UpdateInfo | null> | null = null;
+let linuxInFlightCheck: Promise<UpdateStatus> | null = null;
 // Generation counter: incremented every time setChannel() replaces velopackUm
 // so that in-flight checks from the old channel can detect they are stale and
 // skip all state mutations + broadcasts. Without this, a check running on the
@@ -95,6 +125,7 @@ function broadcast(channel: string, payload: unknown): void {
 }
 
 function currentVersion(): string | null {
+    if (isLinux) return app.getVersion();
     if (!velopackUm) return null;
     try {
         return velopackUm.getCurrentVersion();
@@ -129,7 +160,7 @@ function createManager(channel: UpdateChannel): void {
     // main.ts caught and logged rather than crashed on — is surfaced as the
     // 'error' state by init()/setChannel() instead of crashing the process.
     // createManager() is only ever reached on win/mac (init()/setChannel()
-    // short-circuit on Linux), so the require is safe to run here.
+    // route to the Linux path first), so the require is safe to run here.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { UpdateManager } = require('velopack') as typeof import('velopack');
     velopackUm = new UpdateManager(FEED_URL, {
@@ -139,17 +170,132 @@ function createManager(channel: UpdateChannel): void {
     });
 }
 
+// ── Linux (AppImage) update path ────────────────────────────────────────
+
+type LinuxUpdateState = { sha: string };
+
+function linuxStatePath(): string {
+    return path.join(app.getPath('userData'), 'linux-update-state.json');
+}
+
+function readLinuxState(): LinuxUpdateState | null {
+    try {
+        return JSON.parse(fs.readFileSync(linuxStatePath(), 'utf8')) as LinuxUpdateState;
+    } catch {
+        return null;
+    }
+}
+
+function writeLinuxState(state: LinuxUpdateState): void {
+    try {
+        fs.writeFileSync(linuxStatePath(), JSON.stringify(state));
+    } catch (err) {
+        console.error('[update-manager] Failed to persist Linux update state:', err);
+    }
+}
+
+type GithubReleaseAsset = { name: string; browser_download_url: string };
+type GithubRelease = { target_commitish: string; assets: GithubReleaseAsset[] };
+
+async function checkNowLinux(): Promise<UpdateStatus> {
+    const appImagePath = process.env.APPIMAGE;
+    if (!appImagePath || currentChannel !== 'nightly') {
+        return { status: 'unsupported', platform: 'linux' };
+    }
+    if (linuxInFlightCheck) {
+        return linuxInFlightCheck;
+    }
+    const myGeneration = checkGeneration;
+    activeState = 'checking';
+    const run = (async (): Promise<UpdateStatus> => {
+        try {
+            const res = await fetch(GITHUB_NIGHTLY_RELEASE_API);
+            if (!res.ok) {
+                throw new Error(`GitHub API returned ${res.status}`);
+            }
+            const release = (await res.json()) as GithubRelease;
+            if (checkGeneration !== myGeneration) return getStatus();
+            lastChecked = Date.now();
+            lastError = null;
+
+            const asset = release.assets.find((a) => a.name.endsWith('.AppImage'));
+            if (!asset) {
+                throw new Error('No .AppImage asset found in the nightly release');
+            }
+            const sha = release.target_commitish;
+            const state = readLinuxState();
+            if (!state || state.sha !== sha) {
+                if (!state) {
+                    // First run since this feature shipped: adopt the current
+                    // nightly's SHA as the baseline rather than immediately
+                    // "discovering" an update for a build the user may have
+                    // just installed.
+                    writeLinuxState({ sha });
+                    activeState = 'idle';
+                    pendingVersion = null;
+                    pendingDownloaded = null;
+                    return getStatus();
+                }
+                const shortSha = sha.slice(0, 7);
+                pendingVersion = shortSha;
+                activeState = 'downloading';
+                broadcast(IPC_UPDATE_EVENT_AVAILABLE, { version: shortSha, channel: currentChannel });
+
+                const dl = await fetch(asset.browser_download_url);
+                if (!dl.ok) {
+                    throw new Error(`Download failed: HTTP ${dl.status}`);
+                }
+                const buf = Buffer.from(await dl.arrayBuffer());
+                // Download next to the running AppImage so the rename below
+                // stays on the same filesystem (required for it to be atomic).
+                const tmpPath = `${appImagePath}.new`;
+                fs.writeFileSync(tmpPath, buf);
+                fs.chmodSync(tmpPath, 0o755);
+                fs.renameSync(tmpPath, appImagePath);
+                writeLinuxState({ sha });
+
+                if (checkGeneration !== myGeneration) return getStatus();
+                pendingDownloaded = { version: shortSha };
+                activeState = 'downloaded';
+                broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
+            } else {
+                activeState = 'idle';
+                pendingVersion = null;
+                pendingDownloaded = null;
+            }
+        } catch (err) {
+            if (checkGeneration !== myGeneration) return getStatus();
+            const message = err instanceof Error ? err.message : String(err);
+            console.error('[update-manager] Linux checkNow failed:', message);
+            lastError = message;
+            activeState = 'error';
+        }
+        return getStatus();
+    })();
+    linuxInFlightCheck = run;
+    try {
+        return await run;
+    } finally {
+        if (linuxInFlightCheck === run) {
+            linuxInFlightCheck = null;
+        }
+    }
+}
+
 /**
  * Initialize the updater. Must be called once after `app.whenReady()` and
  * after at least one BrowserWindow exists (so the first broadcast lands).
- * On Linux this is a no-op.
  */
 export function init(channel: UpdateChannel = 'stable'): void {
+    currentChannel = channel;
     if (isLinux) {
-        console.log('[update-manager] Linux: auto-update disabled (electron-builder AppImage/deb only).');
+        initialCheckTimer = setTimeout(() => {
+            initialCheckTimer = null;
+            void checkNow();
+        }, 30_000);
+        pollTimer = setInterval(() => { void checkNow(); }, POLL_INTERVAL_MS);
         return;
     }
-    currentChannel = channel;
     try {
         createManager(channel);
     } catch (err) {
@@ -189,11 +335,11 @@ export function init(channel: UpdateChannel = 'stable'): void {
  * Switch release channel at runtime. Recreates the underlying Velopack
  * UpdateManager (the SDK has no in-place channel swap) and triggers an
  * immediate check so the renderer can update its banner without waiting for
- * the next 4h tick. On Linux this is a no-op.
+ * the next 4h tick. On Linux this just re-evaluates the (channel-gated)
+ * nightly checker.
  */
 export function setChannel(channel: UpdateChannel): void {
-    if (isLinux) return;
-    if (channel === currentChannel && velopackUm) return;
+    if (channel === currentChannel && (isLinux || velopackUm)) return;
     currentChannel = channel;
     pendingVersion = null;
     pendingDownloaded = null;
@@ -205,11 +351,12 @@ export function setChannel(channel: UpdateChannel): void {
     activeState = 'idle';
     // Bump the generation counter so any still-running check from the old
     // channel sees its epoch is stale and skips all state mutations +
-    // broadcasts when its promise resolves. Also null inFlightCheck so the
-    // new checkNow() below starts a fresh lock rather than coalescing onto
-    // the old (stale) promise.
+    // broadcasts when its promise resolves. Also null the in-flight locks so
+    // the new checkNow() below starts a fresh lock rather than coalescing
+    // onto the old (stale) promise.
     checkGeneration++;
     inFlightCheck = null;
+    linuxInFlightCheck = null;
     // The immediate checkNow() below supersedes init()'s pending boot check.
     // The renderer calls setChannel() on boot to sync the persisted channel,
     // so without this a non-stable channel would fire a second redundant
@@ -217,6 +364,10 @@ export function setChannel(channel: UpdateChannel): void {
     if (initialCheckTimer) {
         clearTimeout(initialCheckTimer);
         initialCheckTimer = null;
+    }
+    if (isLinux) {
+        void checkNow();
+        return;
     }
     try {
         createManager(channel);
@@ -233,11 +384,11 @@ export function setChannel(channel: UpdateChannel): void {
 /**
  * Trigger an immediate update check + download. Coalesces concurrent calls
  * (renderer button-mashing, overlapping poll timer) onto the same promise
- * so we don't fire parallel HTTP requests at the GitHub feed.
+ * so we don't fire parallel HTTP requests at the feed.
  */
 export async function checkNow(): Promise<UpdateStatus> {
     if (isLinux) {
-        return { status: 'unsupported', platform: 'linux' };
+        return checkNowLinux();
     }
     if (!velopackUm) {
         return {
@@ -325,17 +476,47 @@ export async function checkNow(): Promise<UpdateStatus> {
 }
 
 /**
- * Apply the downloaded update and restart the app. waitExitThenApplyUpdate()
- * launches the Velopack updater and tells it to wait for THIS process to
- * exit — it does NOT exit us. We must quit the app ourselves; the updater
- * then swaps binaries and relaunches. It only waits ~60s for our exit, so we
- * quit promptly (on the next tick, so this IPC call can return first).
- * activeState is left at 'downloaded' so that if the quit is vetoed or
- * delayed the restart banner stays visible for a retry.
+ * Apply the downloaded update and restart the app.
+ *
+ * Windows/macOS: waitExitThenApplyUpdate() launches the Velopack updater and
+ * tells it to wait for THIS process to exit — it does NOT exit us. We must
+ * quit the app ourselves; the updater then swaps binaries and relaunches. It
+ * only waits ~60s for our exit, so we quit promptly (on the next tick, so
+ * this IPC call can return first). activeState is left at 'downloaded' so
+ * that if the quit is vetoed or delayed the restart banner stays visible for
+ * a retry.
+ *
+ * Linux: checkNowLinux() already replaced the AppImage file on disk (Linux
+ * allows overwriting a file that's currently executing). There's nothing
+ * left to "apply" — just launch the (already-new) AppImage as a detached
+ * process and quit this one.
  */
 export function applyAndRestart(): UpdateStatus {
     if (isLinux) {
-        return { status: 'unsupported', platform: 'linux' };
+        const appImagePath = process.env.APPIMAGE;
+        if (!appImagePath) {
+            return { status: 'unsupported', platform: 'linux' };
+        }
+        if (activeState !== 'downloaded' || !pendingDownloaded) {
+            return {
+                status: 'error',
+                channel: currentChannel,
+                currentVersion: currentVersion(),
+                lastChecked,
+                message: 'No update is ready to apply',
+            };
+        }
+        try {
+            spawn(appImagePath, [], { detached: true, stdio: 'ignore' }).unref();
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error('[update-manager] Linux relaunch failed:', message);
+            lastError = message;
+            activeState = 'error';
+            return getStatus();
+        }
+        setImmediate(() => app.quit());
+        return getStatus();
     }
     if (!velopackUm) {
         return {
@@ -391,7 +572,7 @@ export function applyAndRestart(): UpdateStatus {
 }
 
 export function getStatus(): UpdateStatus {
-    if (isLinux) {
+    if (isLinux && (!process.env.APPIMAGE || currentChannel !== 'nightly')) {
         return { status: 'unsupported', platform: 'linux' };
     }
     const base = {

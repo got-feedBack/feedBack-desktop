@@ -1,6 +1,15 @@
 #!/bin/bash
 # Docker-based Linux build wrapper
 # Runs build-linux-ubuntu.sh inside a reproducible container
+#
+# --platform linux/amd64 is forced on both build and run: the Linux target is
+# x86_64-only end to end (bundle-python.sh's python-build-standalone pin,
+# vgmstream, onnxruntime, etc. have no arm64 Linux build, and Steam Deck
+# itself is x86_64). On an Apple Silicon host, omitting --platform makes
+# `docker build` produce a native arm64 image, so bundle-python.sh's hardcoded
+# x86_64 download becomes a foreign-arch binary inside an otherwise-native
+# container — Rosetta chokes trying to exec it directly instead of via full
+# amd64 emulation. Forcing amd64 for the whole container sidesteps that.
 
 set -euo pipefail
 
@@ -44,6 +53,7 @@ echo " (This will take a few minutes on first run)"
 echo ""
 
 docker build \
+    --platform linux/amd64 \
     -f "$DEVCONTAINER_DIR/Dockerfile" \
     -t slopsmith-ubuntu-builder \
     "$PROJECT_DIR"
@@ -75,6 +85,7 @@ echo ""
 
 set +e
 docker run \
+    --platform linux/amd64 \
     --name "$CONTAINER_NAME" \
     -v "$PROJECT_DIR:/workspace" \
     -w /workspace \
@@ -83,6 +94,7 @@ docker run \
     -e GIT_TERMINAL_PROMPT=0 \
     -e "GH_CLONE_TOKEN=${GH_CLONE_TOKEN:-}" \
     -e "SLOPSMITH_REF=${SLOPSMITH_REF:-main}" \
+    -e "SLOPSMITH_REPO=${SLOPSMITH_REPO:-got-feedback/feedback}" \
     -t \
     slopsmith-ubuntu-builder \
     bash -c './scripts/build-linux-ubuntu.sh'

@@ -554,11 +554,13 @@ const feedBackDesktopApi = {
         },
     },
 
-    // Auto-update (Velopack). The Settings panel reads/writes
-    // localStorage['slopsmith-update-channel'] and mirrors it via setChannel.
-    // Linux short-circuits to { status: "unsupported", platform: "linux" } on
-    // every call — renderer should branch on that and surface a "download
-    // from Releases" note rather than disabling the panel entirely.
+    // Auto-update (Velopack on win/mac, a home-grown AppImage self-updater on
+    // Linux — see update-manager.ts). The Settings panel reads/writes
+    // localStorage['feedBack-update-channel'] and mirrors it via setChannel.
+    // Linux only supports the nightly channel when running as an AppImage;
+    // any other case returns { status: "unsupported", platform: "linux" } —
+    // renderer should branch on that and surface a fallback note rather than
+    // disabling the panel entirely.
     update: {
         getStatus: () => ipcRenderer.invoke(IPC_UPDATE_GET_STATUS),
         setChannel: (channel: UpdateChannel) => ipcRenderer.invoke(IPC_UPDATE_SET_CHANNEL, channel),
