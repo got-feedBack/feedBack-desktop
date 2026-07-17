@@ -131,6 +131,43 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
 
         if (isDuplex)
         {
+            // ASIO drivers commonly allow only one live device object.  If
+            // this exact duplex endpoint is already open, constructing a
+            // second object can succeed but report zero channel names (the
+            // settings UI then incorrectly falls back to Inputs 1-2).  Reuse
+            // the live device's immutable capability lists instead.  The
+            // endpoint checks keep a newly selected device on the normal
+            // temporary-probe path.
+            auto* liveDevice = inMgr.getCurrentAudioDevice();
+            auto* liveType = inMgr.getCurrentDeviceTypeObject();
+            const auto liveSetup = inMgr.getAudioDeviceSetup();
+            const bool requestedEndpointIsLive =
+                liveDevice != nullptr
+                && liveDevice->isOpen()
+                && liveType != nullptr
+                && liveType->getTypeName() == options.inputType
+                && liveSetup.inputDeviceName == probeInputName
+                && liveSetup.outputDeviceName == probeOutputName;
+
+            if (requestedEndpointIsLive)
+            {
+                options.inputChannels = liveDevice->getInputChannelNames();
+                options.outputChannels = liveDevice->getOutputChannelNames();
+                for (auto rate : liveDevice->getAvailableSampleRates())
+                    options.sampleRates.addIfNotAlreadyThere(rate);
+                for (auto size : liveDevice->getAvailableBufferSizes())
+                    options.bufferSizes.addIfNotAlreadyThere(size);
+
+                fprintf(stderr, "[AudioEngine] Probed live device options: "
+                        "inType='%s' outType='%s' in='%s' out='%s' "
+                        "inputs=%d outputs=%d rates=%d buffers=%d compatible=1\n",
+                        options.inputType.toRawUTF8(), options.outputType.toRawUTF8(),
+                        options.input.toRawUTF8(), options.output.toRawUTF8(),
+                        options.inputChannels.size(), options.outputChannels.size(),
+                        options.sampleRates.size(), options.bufferSizes.size());
+                return options;
+            }
+
             std::unique_ptr<juce::AudioIODevice> dev(
                 inputType->createDevice(probeOutputName, probeInputName));
             if (dev)

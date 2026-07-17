@@ -20,6 +20,27 @@ const end = source.indexOf('DeviceConfigResult DeviceSetup::applySplit', start);
 // a bad slice would otherwise make every assertion below fail confusingly.
 assert.ok(start >= 0 && end > start, 'could not locate applyDuplex in DeviceSetup.cpp');
 const applyDuplex = source.slice(start, end);
+const probeStart = source.indexOf('DeviceOptions DeviceSetup::probeDual');
+const probeEnd = source.indexOf('juce::String DeviceSetup::applyDuplex', probeStart);
+const probeDual = source.slice(probeStart, probeEnd);
+
+test('duplex probe reuses an exact live endpoint before constructing a competing device', () => {
+    assert.ok(probeStart >= 0 && probeEnd > probeStart, 'could not locate probeDual');
+
+    const inspectLive = probeDual.indexOf('inMgr.getCurrentAudioDevice()');
+    const exactEndpoint = probeDual.indexOf('const bool requestedEndpointIsLive');
+    const requireOpen = probeDual.indexOf('liveDevice->isOpen()', exactEndpoint);
+    const reuseChannels = probeDual.indexOf(
+        'options.inputChannels = liveDevice->getInputChannelNames()');
+    const temporaryProbe = probeDual.indexOf(
+        'inputType->createDevice(probeOutputName, probeInputName)');
+
+    assert.ok(inspectLive >= 0 && exactEndpoint > inspectLive,
+        'the probe must inspect and identity-check the live endpoint');
+    assert.ok(requireOpen > exactEndpoint && reuseChannels > requireOpen
+        && temporaryProbe > reuseChannels,
+        'matching live capabilities must be returned before a temporary device is created');
+});
 
 test('duplex setup closes Windows ASIO before constructing its channel probe', () => {
     assert.match(
