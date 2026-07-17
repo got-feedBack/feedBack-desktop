@@ -200,6 +200,7 @@ clone_slopsmith() {
 
 	local total=0
 	local cloned=0
+	local expected_dirnames=()
 	for entry in "${plugins[@]}"; do
 		total=$((total + 1))
 		# Split off an optional ":<dirname>" then an optional "@<branch>".
@@ -220,6 +221,7 @@ clone_slopsmith() {
 			dirname="${dirname#feedback-plugin-}"
 			dirname="${dirname//-/_}"
 		fi
+		expected_dirnames+=("$dirname")
 		# clone_or_update reuses a cached plugin checkout (persistent clone_dir)
 		# and honors the optional @branch pin via $branch; a fresh dir falls back
 		# to a full shallow clone. dirname is relative to the plugins/ cwd.
@@ -229,6 +231,34 @@ clone_slopsmith() {
 			echo " skipped ${owner_repo}${branch:+@$branch}"
 		fi
 	done
+
+	# Prune plugins no longer configured. clone_or_update's `reset --hard` (not
+	# `clean`) deliberately preserves sibling directories — needed so a
+	# persistent cache survives repeated core-repo updates — but that means a
+	# plugin removed or renamed here would otherwise leave its old clone behind
+	# forever, and bundle-slopsmith.sh bundles every directory under plugins/
+	# (globs "$SLOPSMITH_DIR/plugins/"*), so a stale clone would ship into the
+	# app. Track dirnames this loop has managed across runs in a manifest (a
+	# dotfile, so that glob skips it) and delete any previously-managed
+	# dirname that's absent from this run's list. Never touches a directory
+	# we didn't create ourselves (e.g. anything that's part of the core repo's
+	# own tracked tree, which isn't in the manifest).
+	local manifest="$clone_dir/plugins/.managed-plugins"
+	if [[ -f "$manifest" ]]; then
+		local prior_dirname still_wanted d
+		while IFS= read -r prior_dirname; do
+			[[ -n "$prior_dirname" ]] || continue
+			still_wanted=0
+			for d in "${expected_dirnames[@]}"; do
+				[[ "$d" == "$prior_dirname" ]] && still_wanted=1 && break
+			done
+			if [[ "$still_wanted" == "0" && -d "$clone_dir/plugins/$prior_dirname" ]]; then
+				echo "  Pruning stale cached plugin: $prior_dirname"
+				rm -rf "$clone_dir/plugins/$prior_dirname"
+			fi
+		done < "$manifest"
+	fi
+	printf '%s\n' "${expected_dirnames[@]}" > "$manifest"
 
 	# Strip dangling symlinks from the bundled tree. Some plugins ship
 	# build-time symlinks into sources that aren't present at runtime (e.g.
