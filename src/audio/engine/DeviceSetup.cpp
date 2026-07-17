@@ -252,6 +252,27 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
     setup.useDefaultInputChannels = inputName.isEmpty();
     setup.useDefaultOutputChannels = outputName.isEmpty();
 
+    // Every unsuccessful reconfiguration must leave the manager and the
+    // externally readable engine format in one truthful state: closed/zero.
+    // In particular, never keep a stale ASIO device or the previous 256-sample
+    // state alive after a failed request for 512.
+    auto failClosed = [&](const juce::String& error) -> juce::String {
+        fprintf(stderr, "[AudioEngine] Duplex reconfigure failed: %s; closing device\n",
+                error.toRawUTF8());
+        try { inMgr.closeAudioDevice(); }
+        catch (...) {
+            fprintf(stderr, "[AudioEngine] Duplex failure cleanup: closeAudioDevice threw\n");
+        }
+        state.currentSampleRate.store(0.0, std::memory_order_relaxed);
+        state.inputBlockSize.store(0, std::memory_order_relaxed);
+        state.outputBlockSize.store(0, std::memory_order_relaxed);
+        try { monitorChain.releaseMonitorChain(); }
+        catch (...) {
+            fprintf(stderr, "[AudioEngine] Duplex failure cleanup: monitor release threw\n");
+        }
+        return error;
+    };
+
     // Channel masks must match too — high-numbered selectedInputChannel needs
     // the expanded mask that an older session may not have opened.
     if (auto* currentDevice = inMgr.getCurrentAudioDevice())
@@ -277,6 +298,7 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
                 && current.useDefaultOutputChannels == setup.useDefaultOutputChannels
                 && current.inputChannels == expectedInputs
                 && current.outputChannels == expectedOutputs
+                && currentDevice->isOpen()
                 && state.duplexMode.load(std::memory_order_relaxed))
             {
                 fprintf(stderr, "[AudioEngine] Duplex device already configured with same settings, skipping\n");
@@ -293,29 +315,45 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
         }
     }
 
-    // ALSA deadlocks on reconfigure unless we fully close first. WASAPI
-    // reconfigures in place and is much slower if closed.
-#if JUCE_LINUX
+    // ALSA and Windows ASIO both need a full close before reconfiguration.
+    // The Helix driver was observed accepting a first request without changing
+    // its buffer, then wedging JUCE's message thread on the next in-place
+    // request. Close BEFORE the temporary channel probe too: constructing an
+    // ASIO device initialises the driver and briefly starts dummy buffers, so a
+    // probe must never overlap the live primary instance. WASAPI remains
+    // in-place because closing it is materially slower and this failure mode is
+    // specific to ASIO.
     juce::String currentTypeName;
     if (auto* currentType = inMgr.getCurrentDeviceTypeObject())
         currentTypeName = currentType->getTypeName();
-    if (inMgr.getCurrentAudioDevice() != nullptr)
+
+    bool closeBeforeReconfigure = false;
+#if JUCE_LINUX
+    closeBeforeReconfigure = true;
+#elif JUCE_WINDOWS
+    closeBeforeReconfigure = (currentTypeName == "ASIO");
+#endif
+
+    if (closeBeforeReconfigure && inMgr.getCurrentAudioDevice() != nullptr)
     {
+        fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=close begin type='%s'\n",
+                currentTypeName.toRawUTF8());
         try {
             inMgr.closeAudioDevice();
-            fprintf(stderr, "[AudioEngine] Closed device for reconfiguration\n");
-            if (currentTypeName.isNotEmpty())
-                inMgr.setCurrentAudioDeviceType(currentTypeName, true);
+            // AudioDeviceManager::closeAudioDevice() preserves its current
+            // device type/setup. setAudioDeviceSetup() below sees a null
+            // device and creates a fresh instance of that same type.
         } catch (...) {
-            fprintf(stderr, "[AudioEngine] closeAudioDevice crashed, continuing\n");
+            return failClosed("closeAudioDevice threw before reconfiguration");
         }
+        fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=close complete\n");
     }
-#endif
 
     int inputChannelCount = 0;
     int outputChannelCount = 0;
     if (auto* type = inMgr.getCurrentDeviceTypeObject())
     {
+        fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=probe begin\n");
         try
         {
             if (auto probe = std::unique_ptr<juce::AudioIODevice>(type->createDevice(outputName, inputName)))
@@ -332,6 +370,8 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
         {
             fprintf(stderr, "[AudioEngine] Channel probe failed (unknown)\n");
         }
+        fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=probe complete inputs=%d outputs=%d\n",
+                inputChannelCount, outputChannelCount);
     }
     if (inputChannelCount <= 0) inputChannelCount = 2;
     if (outputChannelCount <= 0) outputChannelCount = 2;
@@ -340,27 +380,93 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
     setup.outputChannels.setRange(0, juce::jmin(outputChannelCount, 2), true);
 
     juce::String result;
+    fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=open begin sr=%.0f bs=%d\n",
+            setup.sampleRate, setup.bufferSize);
     try {
         result = inMgr.setAudioDeviceSetup(setup, true);
     } catch (...) {
-        return "setAudioDeviceSetup threw";
+        return failClosed("setAudioDeviceSetup threw");
     }
+    fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=open complete error='%s'\n",
+            result.toRawUTF8());
     if (result.isNotEmpty())
     {
-        fprintf(stderr, "[AudioEngine] Device setup error: %s\n", result.toRawUTF8());
-        try {
-            result = inMgr.initialiseWithDefaultDevices(2, 2);
-        } catch (...) {
-            return "fallback initialiseWithDefaultDevices threw";
-        }
-        if (result.isNotEmpty())
-            return "device setup failed: " + result;
+        // A default-device fallback used to convert this failure into success,
+        // leaving only two channels active while the UI saved the requested
+        // ASIO device. Preserve the original error and stay closed instead.
+        return failClosed("device setup failed: " + result);
     }
 
     if (auto* configuredDevice = inMgr.getCurrentAudioDevice())
     {
+        if (!configuredDevice->isOpen())
+            return failClosed("device is not open after setup");
+
         const double sr = configuredDevice->getCurrentSampleRate();
         const int bs = configuredDevice->getCurrentBufferSizeSamples();
+
+        // For explicitly named endpoints, "all inputs / first two outputs" is
+        // the requested contract. Rebuild those masks from the opened device's
+        // advertised channels so a failed pre-open probe cannot silently
+        // collapse an 8-input ASIO interface to the old two-channel fallback.
+        juce::BigInteger expectedInputs = setup.inputChannels;
+        if (!setup.useDefaultInputChannels)
+        {
+            expectedInputs.clear();
+            expectedInputs.setRange(
+                0, configuredDevice->getInputChannelNames().size(), true);
+        }
+        juce::BigInteger expectedOutputs = setup.outputChannels;
+        if (!setup.useDefaultOutputChannels)
+        {
+            expectedOutputs.clear();
+            expectedOutputs.setRange(
+                0, juce::jmin(configuredDevice->getOutputChannelNames().size(), 2), true);
+        }
+
+        const auto actualInputs = configuredDevice->getActiveInputChannels();
+        const auto actualOutputs = configuredDevice->getActiveOutputChannels();
+        const bool inputChannelsMatch =
+            setup.useDefaultInputChannels || actualInputs == expectedInputs;
+        const bool outputChannelsMatch =
+            setup.useDefaultOutputChannels || actualOutputs == expectedOutputs;
+
+        fprintf(stderr,
+                "[AudioEngine] Duplex reconfigure phase=verify requested(sr=%.0f bs=%d in=%s out=%s) "
+                "actual(sr=%.0f bs=%d in=%s out=%s)\n",
+                setup.sampleRate, setup.bufferSize,
+                expectedInputs.toString(2).toRawUTF8(),
+                expectedOutputs.toString(2).toRawUTF8(),
+                sr, bs,
+                actualInputs.toString(2).toRawUTF8(),
+                actualOutputs.toString(2).toRawUTF8());
+
+        switch (validateOpenedDeviceFormat(
+            setup.sampleRate, setup.bufferSize, sr, bs,
+            inputChannelsMatch, outputChannelsMatch))
+        {
+            case DeviceFormatMismatch::sampleRate:
+                return failClosed(
+                    "device opened at sample rate " + juce::String(sr)
+                    + " (requested " + juce::String(setup.sampleRate) + ")");
+            case DeviceFormatMismatch::bufferSize:
+                return failClosed(
+                    "device opened at buffer size " + juce::String(bs)
+                    + " (requested " + juce::String(setup.bufferSize) + ")");
+            case DeviceFormatMismatch::inputChannels:
+                return failClosed(
+                    "device opened with input channel mask "
+                    + actualInputs.toString(2) + " (requested "
+                    + expectedInputs.toString(2) + ")");
+            case DeviceFormatMismatch::outputChannels:
+                return failClosed(
+                    "device opened with output channel mask "
+                    + actualOutputs.toString(2) + " (requested "
+                    + expectedOutputs.toString(2) + ")");
+            case DeviceFormatMismatch::none:
+                break;
+        }
+
         state.currentSampleRate.store(sr, std::memory_order_relaxed);
         state.inputBlockSize.store(bs, std::memory_order_relaxed);
         state.outputBlockSize.store(bs, std::memory_order_relaxed);
@@ -373,11 +479,7 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
         monitorChain.prepareMonitorChain(sr, bs);
         return {};
     }
-    state.currentSampleRate.store(0.0, std::memory_order_relaxed);
-    state.inputBlockSize.store(0, std::memory_order_relaxed);
-    state.outputBlockSize.store(0, std::memory_order_relaxed);
-    monitorChain.releaseMonitorChain();
-    return "no current device after setup";
+    return failClosed("no current device after setup");
 }
 
 DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,

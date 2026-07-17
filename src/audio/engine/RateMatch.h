@@ -30,4 +30,38 @@ inline bool nominalRateCandidate(double r, double r2, double& candidate) noexcep
     return ratesMatch(r, candidate) && ratesMatch(r2, candidate);
 }
 
+// Post-open verification result shared by device setup. JUCE drivers may
+// choose a "best" format when the exact request is unavailable; that is useful
+// for generic callers, but this app must not report success for a different
+// buffer/rate/channel mask than the user selected. Channel equality is
+// computed by the JUCE-facing caller and passed as booleans so this decision
+// table stays JUCE-free and unit-testable.
+enum class DeviceFormatMismatch
+{
+    none,
+    sampleRate,
+    bufferSize,
+    inputChannels,
+    outputChannels,
+};
+
+inline DeviceFormatMismatch validateOpenedDeviceFormat(
+    double requestedSampleRate,
+    int requestedBufferSize,
+    double actualSampleRate,
+    int actualBufferSize,
+    bool inputChannelsMatch,
+    bool outputChannelsMatch) noexcept
+{
+    if (!ratesMatch(requestedSampleRate, actualSampleRate))
+        return DeviceFormatMismatch::sampleRate;
+    if (requestedBufferSize != actualBufferSize)
+        return DeviceFormatMismatch::bufferSize;
+    if (!inputChannelsMatch)
+        return DeviceFormatMismatch::inputChannels;
+    if (!outputChannelsMatch)
+        return DeviceFormatMismatch::outputChannels;
+    return DeviceFormatMismatch::none;
+}
+
 } // namespace slopsmith

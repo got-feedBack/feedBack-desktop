@@ -10,6 +10,8 @@
 
 using slopsmith::ratesMatch;
 using slopsmith::nominalRateCandidate;
+using slopsmith::DeviceFormatMismatch;
+using slopsmith::validateOpenedDeviceFormat;
 
 int main()
 {
@@ -40,6 +42,20 @@ int main()
 
     // Non-matching pair → no candidate at all.
     assert(!nominalRateCandidate(44100.0, 48000.0, c));
+
+    // A device setup is successful only when the driver accepted every
+    // requested format field. This pins the Helix regression where JUCE
+    // returned success for a 512 request while the driver remained at 256.
+    assert(validateOpenedDeviceFormat(48000.0, 512, 48000.0, 512, true, true)
+           == DeviceFormatMismatch::none);
+    assert(validateOpenedDeviceFormat(48000.0, 512, 44100.0, 512, true, true)
+           == DeviceFormatMismatch::sampleRate);
+    assert(validateOpenedDeviceFormat(48000.0, 512, 48000.0, 256, true, true)
+           == DeviceFormatMismatch::bufferSize);
+    assert(validateOpenedDeviceFormat(48000.0, 512, 48000.0, 512, false, true)
+           == DeviceFormatMismatch::inputChannels);
+    assert(validateOpenedDeviceFormat(48000.0, 512, 48000.0, 512, true, false)
+           == DeviceFormatMismatch::outputChannels);
 
     std::puts("rate_match: all cases passed");
     return 0;
