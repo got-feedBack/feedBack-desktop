@@ -121,7 +121,11 @@ copy_plugin() {
     local dst="$2"
     mkdir -p "$dst"
     # Use cp -R rather than -r for portable symlink-following semantics.
-    cp -R "$src/." "$dst/"
+    # -L dereferences symlinks INSIDE the tree (rig_builder's
+    # vst/src/*/_shared -> ../_shared): Git Bash cannot create symlinks
+    # without Developer Mode / SeCreateSymbolicLink, and the bundle wants
+    # real files anyway.
+    cp -RL "$src/." "$dst/"
     find "$dst" -name '.git' -type d -prune -exec rm -rf {} +
 }
 
