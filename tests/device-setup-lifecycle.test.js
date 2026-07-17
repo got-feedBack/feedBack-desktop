@@ -16,10 +16,12 @@ const source = fs.readFileSync(
 
 const start = source.indexOf('juce::String DeviceSetup::applyDuplex');
 const end = source.indexOf('DeviceConfigResult DeviceSetup::applySplit', start);
+// Fail with a clear message before any slicing if the function markers move —
+// a bad slice would otherwise make every assertion below fail confusingly.
+assert.ok(start >= 0 && end > start, 'could not locate applyDuplex in DeviceSetup.cpp');
 const applyDuplex = source.slice(start, end);
 
 test('duplex setup closes Windows ASIO before constructing its channel probe', () => {
-    assert.ok(start >= 0 && end > start, 'could not locate applyDuplex');
     assert.match(
         applyDuplex,
         /#elif JUCE_WINDOWS\s+closeBeforeReconfigure = \(currentTypeName == "ASIO"\);/);

@@ -266,6 +266,7 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
         state.currentSampleRate.store(0.0, std::memory_order_relaxed);
         state.inputBlockSize.store(0, std::memory_order_relaxed);
         state.outputBlockSize.store(0, std::memory_order_relaxed);
+        state.duplexMode.store(false, std::memory_order_relaxed);
         try { monitorChain.releaseMonitorChain(); }
         catch (...) {
             fprintf(stderr, "[AudioEngine] Duplex failure cleanup: monitor release threw\n");
@@ -409,20 +410,18 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
         // the requested contract. Rebuild those masks from the opened device's
         // advertised channels so a failed pre-open probe cannot silently
         // collapse an 8-input ASIO interface to the old two-channel fallback.
-        juce::BigInteger expectedInputs = setup.inputChannels;
-        if (!setup.useDefaultInputChannels)
-        {
-            expectedInputs.clear();
+        juce::BigInteger expectedInputs;
+        if (setup.useDefaultInputChannels)
+            expectedInputs = setup.inputChannels;
+        else
             expectedInputs.setRange(
                 0, configuredDevice->getInputChannelNames().size(), true);
-        }
-        juce::BigInteger expectedOutputs = setup.outputChannels;
-        if (!setup.useDefaultOutputChannels)
-        {
-            expectedOutputs.clear();
+        juce::BigInteger expectedOutputs;
+        if (setup.useDefaultOutputChannels)
+            expectedOutputs = setup.outputChannels;
+        else
             expectedOutputs.setRange(
                 0, juce::jmin(configuredDevice->getOutputChannelNames().size(), 2), true);
-        }
 
         const auto actualInputs = configuredDevice->getActiveInputChannels();
         const auto actualOutputs = configuredDevice->getActiveOutputChannels();
