@@ -138,6 +138,11 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
             // the live device's immutable capability lists instead.  The
             // endpoint checks keep a newly selected device on the normal
             // temporary-probe path.
+            //
+            // Reading the live device here is safe only because probes and
+            // device mutations are serialised on the JUCE message thread
+            // (runDeviceLifecycleOp, PR #113) — a caller probing off-thread
+            // would race applyDuplex's close/reopen.
             auto* liveDevice = inMgr.getCurrentAudioDevice();
             auto* liveType = inMgr.getCurrentDeviceTypeObject();
             const auto liveSetup = inMgr.getAudioDeviceSetup();
@@ -160,11 +165,12 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
 
                 fprintf(stderr, "[AudioEngine] Probed live device options: "
                         "inType='%s' outType='%s' in='%s' out='%s' "
-                        "inputs=%d outputs=%d rates=%d buffers=%d compatible=1\n",
+                        "inputs=%d outputs=%d rates=%d buffers=%d compatible=%d\n",
                         options.inputType.toRawUTF8(), options.outputType.toRawUTF8(),
                         options.input.toRawUTF8(), options.output.toRawUTF8(),
                         options.inputChannels.size(), options.outputChannels.size(),
-                        options.sampleRates.size(), options.bufferSizes.size());
+                        options.sampleRates.size(), options.bufferSizes.size(),
+                        (int) options.compatible);
                 return options;
             }
 
@@ -477,8 +483,26 @@ juce::String DeviceSetup::applyDuplex(const juce::String& inputName,
                 actualInputs.toString(2).toRawUTF8(),
                 actualOutputs.toString(2).toRawUTF8());
 
+        // Buffer-size strictness is ASIO-only. The Helix regression this
+        // gate exists for (success reported at the old buffer size, next
+        // request wedging the message thread) is an ASIO driver behaviour;
+        // ALSA rounds requests to period-size constraints and CoreAudio can
+        // clamp, and both previously worked by storing the driver-adjusted
+        // actuals. Failing those closed would turn a working driver-rounded
+        // 480-for-512 open into "no audio". Rate and channel-mask
+        // verification stay strict on every backend.
+        juce::String configuredTypeName;
+        if (auto* configuredType = inMgr.getCurrentDeviceTypeObject())
+            configuredTypeName = configuredType->getTypeName();
+        const bool strictBufferSize = (configuredTypeName == "ASIO");
+        if (!strictBufferSize && bs != setup.bufferSize)
+            fprintf(stderr, "[AudioEngine] Duplex reconfigure phase=verify "
+                    "accepting driver-adjusted buffer size %d (requested %d, type='%s')\n",
+                    bs, setup.bufferSize, configuredTypeName.toRawUTF8());
+
         switch (validateOpenedDeviceFormat(
-            setup.sampleRate, setup.bufferSize, sr, bs,
+            setup.sampleRate,
+            strictBufferSize ? setup.bufferSize : bs, sr, bs,
             inputChannelsMatch, outputChannelsMatch))
         {
             case DeviceFormatMismatch::sampleRate:

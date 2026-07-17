@@ -68,6 +68,17 @@ test('duplex success is gated on actual rate, buffer, and active channel masks',
     assert.match(applyDuplex, /validateOpenedDeviceFormat\(/);
 });
 
+test('strict buffer-size verification is gated to ASIO; other backends accept driver-adjusted', () => {
+    // ALSA rounds to period constraints and CoreAudio can clamp; both must
+    // keep their pre-#114 store-the-actuals behaviour instead of failing
+    // closed on a working driver-rounded open.
+    assert.match(applyDuplex,
+        /const bool strictBufferSize = \(configuredTypeName == "ASIO"\);/);
+    assert.match(applyDuplex,
+        /strictBufferSize \? setup\.bufferSize : bs/);
+    assert.match(applyDuplex, /accepting driver-adjusted buffer size/);
+});
+
 test('duplex failures clear observable format state and release monitor resources', () => {
     const cleanupStart = applyDuplex.indexOf('auto failClosed =');
     const cleanupEnd = applyDuplex.indexOf('// Channel masks must match too', cleanupStart);
