@@ -29,6 +29,8 @@ import {
     IPC_UPDATE_APPLY,
     IPC_UPDATE_EVENT_AVAILABLE,
     IPC_UPDATE_EVENT_DOWNLOADED,
+    IPC_UPDATE_EVENT_PROGRESS,
+    IPC_UPDATE_EVENT_DIAG,
     IPC_POWER_SET_SCREEN_AWAKE,
     IPC_WINDOW_GET_START_FULLSCREEN,
     IPC_WINDOW_SET_START_FULLSCREEN,
@@ -46,6 +48,8 @@ import {
 export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 export interface UpdateAvailablePayload { version: string; channel: UpdateChannel }
 export interface UpdateDownloadedPayload { version: string; channel: UpdateChannel }
+export interface UpdateProgressPayload { percent: number; channel: UpdateChannel }
+export interface UpdateDiagPayload { ts: number; message: string; data: Record<string, unknown> | null }
 
 // Audio setDevice payload — duplex when input/output types match and device
 // names match (or both empty); split otherwise. NodeAddon validates the
@@ -554,11 +558,13 @@ const feedBackDesktopApi = {
         },
     },
 
-    // Auto-update (Velopack). The Settings panel reads/writes
-    // localStorage['slopsmith-update-channel'] and mirrors it via setChannel.
-    // Linux short-circuits to { status: "unsupported", platform: "linux" } on
-    // every call — renderer should branch on that and surface a "download
-    // from Releases" note rather than disabling the panel entirely.
+    // Auto-update (Velopack on win/mac, a home-grown AppImage self-updater on
+    // Linux — see update-manager.ts). The Settings panel reads/writes
+    // localStorage['feedBack-update-channel'] and mirrors it via setChannel.
+    // Linux only supports the nightly channel when running as an AppImage;
+    // any other case returns { status: "unsupported", platform: "linux" } —
+    // renderer should branch on that and surface a fallback note rather than
+    // disabling the panel entirely.
     update: {
         getStatus: () => ipcRenderer.invoke(IPC_UPDATE_GET_STATUS),
         setChannel: (channel: UpdateChannel) => ipcRenderer.invoke(IPC_UPDATE_SET_CHANNEL, channel),
@@ -573,6 +579,20 @@ const feedBackDesktopApi = {
             const listener = (_event: unknown, payload: UpdateDownloadedPayload) => callback(payload);
             ipcRenderer.on(IPC_UPDATE_EVENT_DOWNLOADED, listener);
             return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_DOWNLOADED, listener);
+        },
+        onProgress: (callback: (payload: UpdateProgressPayload) => void) => {
+            const listener = (_event: unknown, payload: UpdateProgressPayload) => callback(payload);
+            ipcRenderer.on(IPC_UPDATE_EVENT_PROGRESS, listener);
+            return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_PROGRESS, listener);
+        },
+        // Diagnostic trace of main-process update decisions (Linux path).
+        // The renderer subscribes once and console.logs these so they land
+        // in diagnostics.js's exportable console ring buffer alongside the
+        // renderer's own [update-diag] logs.
+        onDiag: (callback: (payload: UpdateDiagPayload) => void) => {
+            const listener = (_event: unknown, payload: UpdateDiagPayload) => callback(payload);
+            ipcRenderer.on(IPC_UPDATE_EVENT_DIAG, listener);
+            return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_DIAG, listener);
         },
     },
     // Keep the OS display/screensaver awake while a song plays. slopsmith core

@@ -18,6 +18,15 @@ export const IPC_UPDATE_APPLY = 'update:apply' as const;
 // update-manager broadcaster and the preload listeners can't drift.
 export const IPC_UPDATE_EVENT_AVAILABLE = 'update:available' as const;
 export const IPC_UPDATE_EVENT_DOWNLOADED = 'update:downloaded' as const;
+// Download-progress ticks (Linux AppImage self-update — a full ~1.5GB fetch,
+// so the renderer needs a percentage rather than a frozen "checking" state).
+export const IPC_UPDATE_EVENT_PROGRESS = 'update:progress' as const;
+// Diagnostic trace of main-process update decisions (Linux path). The
+// renderer's diagnostics.js already wraps console.* into an exportable ring
+// buffer — this event exists purely to get main-process events (invisible to
+// that browser-side wrap) into the SAME renderer console, so they end up in
+// the same "Export Diagnostics" bundle instead of needing a separate log file.
+export const IPC_UPDATE_EVENT_DIAG = 'update:diag' as const;
 
 // Config maintenance — the in-app "Reset / repair configuration" action. The
 // Settings panel reads the enumerated per-OS paths, runs a granular reset, and

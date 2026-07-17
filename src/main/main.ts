@@ -1255,12 +1255,17 @@ async function startup(): Promise<void> {
         return result.canceled ? [] : result.filePaths;
     });
 
-    // App info
+    // App info. buildSha/coreSha come from dist/main/build-info.json (baked
+    // at build time — see build-common.sh) and are the same two SHAs the
+    // Linux update decision compares against the published nightly; exposed
+    // here too so the renderer's diagnostic snapshot can report exactly
+    // which commit of each repo (desktop shell + bundled core) is running.
     ipcMain.handle('app:getInfo', () => ({
         version: app.getVersion(),
         isPackaged: app.isPackaged,
         platform: process.platform,
         resourcesPath: getResourcesPath(),
+        ...updateManager.readBuildInfo(),
     }));
 
     // Config directory
