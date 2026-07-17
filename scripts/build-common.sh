@@ -488,8 +488,15 @@ build_typescript() {
     # electron-builder `files: ["dist/**/*"]` glob and read at runtime by
     # update-manager.ts (path.join(__dirname, 'build-info.json')).
     local build_sha="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
-    node -e "require('fs').writeFileSync('dist/main/build-info.json', JSON.stringify({ sha: process.argv[1] }))" "$build_sha"
+    # Also capture the bundled core (feedBack) repo's commit, cloned earlier
+    # in main() into $SLOPSMITH_DIR (exported by clone_slopsmith). A fix can
+    # live in either repo, so knowing only the desktop SHA isn't enough to
+    # answer "is this build stale" — this is read back by update-manager.ts's
+    # readBuildInfo() and surfaced in the renderer's diagnostic snapshot.
+    local core_sha="$(git -C "${SLOPSMITH_DIR:-}" rev-parse HEAD 2>/dev/null || echo unknown)"
+    node -e "require('fs').writeFileSync('dist/main/build-info.json', JSON.stringify({ sha: process.argv[1], coreSha: process.argv[2] }))" "$build_sha" "$core_sha"
     echo "  Build SHA: $build_sha"
+    echo "  Core SHA:  $core_sha"
     echo_summary "TypeScript built"
     echo ""
 }

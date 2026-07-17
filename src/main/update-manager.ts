@@ -77,7 +77,7 @@ import * as path from 'path';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import type { UpdateInfo } from 'velopack';
-import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED, IPC_UPDATE_EVENT_PROGRESS } from './ipc-channels';
+import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED, IPC_UPDATE_EVENT_PROGRESS, IPC_UPDATE_EVENT_DIAG } from './ipc-channels';
 import { linuxUpdateDecision } from './linux-update-decision';
 
 // Abort the small metadata request if GitHub stalls, so a dead connection
@@ -150,6 +150,22 @@ function broadcast(channel: string, payload: unknown): void {
     }
 }
 
+// Trace of main-process update decisions (Linux path only — this is the
+// half of the story invisible to the renderer's diagnostics.js console wrap).
+// Broadcasting it to the renderer means it lands in the SAME exportable
+// console ring buffer the renderer's own [update-diag] logs use, so a single
+// "Export Diagnostics" click captures both sides. Also console.error()s for
+// visibility when launched from a terminal. Never allowed to affect the
+// actual update flow — swallow any broadcast failure.
+function diagLog(message: string, data?: Record<string, unknown>): void {
+    console.error(`[update-diag] ${message}`, data ?? '');
+    try {
+        broadcast(IPC_UPDATE_EVENT_DIAG, { ts: Date.now(), message, data: data ?? null });
+    } catch {
+        // ignore
+    }
+}
+
 function currentVersion(): string | null {
     if (isLinux) return app.getVersion();
     if (!velopackUm) return null;
@@ -201,19 +217,37 @@ function createManager(channel: UpdateChannel): void {
 type GithubReleaseAsset = { name: string; browser_download_url: string };
 type GithubRelease = { target_commitish: string; assets: GithubReleaseAsset[] };
 
-// The commit this build was cut from, baked into the packaged app by
-// build-common.sh (dist/main/build-info.json, alongside the compiled JS).
-// Returns null for dev/unpackaged builds or an 'unknown' placeholder — the
-// caller then treats the running build as "not the latest nightly" and offers
-// the update, which is the safe default.
-function readBakedSha(): string | null {
+export type BuildInfo = { sha: string | null; coreSha: string | null };
+
+let cachedBuildInfo: BuildInfo | null = null;
+
+// The commit(s) this build was cut from, baked into the packaged app by
+// build-common.sh (dist/main/build-info.json, alongside the compiled JS):
+// `sha` is feedback-desktop's own commit, `coreSha` is the bundled core
+// (feedBack) repo's commit at clone time. Both null for dev/unpackaged
+// builds or an 'unknown' placeholder. A missing `sha` makes the Linux update
+// decision treat the running build as "not the latest nightly" and offer the
+// update, which is the safe default. Exported so main.ts can surface both in
+// app:getInfo, and so the renderer's diagnostic contribute() snapshot can
+// report exactly which commit of EACH repo is actually running — settling
+// "is this build stale" from a single exported log instead of guesswork.
+export function readBuildInfo(): BuildInfo {
+    if (cachedBuildInfo) return cachedBuildInfo;
     try {
         const raw = fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8');
-        const info = JSON.parse(raw) as { sha?: string };
-        return info.sha && info.sha !== 'unknown' ? info.sha : null;
+        const info = JSON.parse(raw) as { sha?: string; coreSha?: string };
+        cachedBuildInfo = {
+            sha: info.sha && info.sha !== 'unknown' ? info.sha : null,
+            coreSha: info.coreSha && info.coreSha !== 'unknown' ? info.coreSha : null,
+        };
     } catch {
-        return null;
+        cachedBuildInfo = { sha: null, coreSha: null };
     }
+    return cachedBuildInfo;
+}
+
+function readBakedSha(): string | null {
+    return readBuildInfo().sha;
 }
 
 // Download the nightly AppImage in the background and swap it in. Kicked off
@@ -223,6 +257,7 @@ function readBakedSha(): string | null {
 // overlapping downloads (a second check while one is running is a no-op here).
 function startLinuxDownload(url: string, appImagePath: string, remoteSha: string, shortSha: string, myGeneration: number): void {
     if (linuxDownloadInFlight) return;
+    diagLog('download start', { url, appImagePath, remoteSha });
     linuxDownloadInFlight = (async (): Promise<void> => {
         try {
             const dl = await fetch(url);
@@ -250,6 +285,9 @@ function startLinuxDownload(url: string, appImagePath: string, remoteSha: string
                             lastPercent = percent;
                             downloadPercent = percent;
                             broadcast(IPC_UPDATE_EVENT_PROGRESS, { percent, channel: currentChannel });
+                            // Every 25% rather than every tick, to keep the
+                            // diagnostic trace readable instead of flooded.
+                            if (percent % 25 === 0) diagLog(`download progress ${percent}%`, { received, total });
                         }
                     }
                     cb(null, chunk);
@@ -261,15 +299,20 @@ function startLinuxDownload(url: string, appImagePath: string, remoteSha: string
             fs.renameSync(tmpPath, appImagePath);
             linuxDownloadedSha = remoteSha;
 
-            if (checkGeneration !== myGeneration) return;
+            if (checkGeneration !== myGeneration) {
+                diagLog('download finished but generation is stale — discarding', { myGeneration, checkGeneration });
+                return;
+            }
             pendingDownloaded = { version: shortSha };
             activeState = 'downloaded';
             downloadPercent = null;
+            diagLog('download complete, swapped in', { received, appImagePath });
             broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
         } catch (err) {
             if (checkGeneration !== myGeneration) return;
             const message = err instanceof Error ? err.message : String(err);
             console.error('[update-manager] Linux download failed:', message);
+            diagLog('download failed', { message });
             lastError = message;
             activeState = 'error';
             downloadPercent = null;
@@ -282,25 +325,35 @@ function startLinuxDownload(url: string, appImagePath: string, remoteSha: string
 async function checkNowLinux(): Promise<UpdateStatus> {
     const appImagePath = process.env.APPIMAGE;
     if (!appImagePath || currentChannel !== 'nightly') {
+        diagLog('checkNow: unsupported', { appImagePath: appImagePath ?? null, currentChannel });
         return { status: 'unsupported', platform: 'linux' };
     }
     // A download already running means we've already found + reported the
     // update; just report the current (downloading) state without a redundant
     // metadata round-trip.
-    if (linuxDownloadInFlight) return getStatus();
+    if (linuxDownloadInFlight) {
+        diagLog('checkNow: download already in flight, returning current status');
+        return getStatus();
+    }
     if (linuxInFlightCheck) {
+        diagLog('checkNow: coalescing onto an already in-flight check');
         return linuxInFlightCheck;
     }
     const myGeneration = checkGeneration;
     activeState = 'checking';
+    diagLog('checkNow: starting', { channel: currentChannel, appImagePath, generation: myGeneration });
     const run = (async (): Promise<UpdateStatus> => {
         try {
             const res = await fetch(GITHUB_NIGHTLY_RELEASE_API, { signal: AbortSignal.timeout(METADATA_FETCH_TIMEOUT_MS) });
+            diagLog('checkNow: GitHub API responded', { status: res.status, url: GITHUB_NIGHTLY_RELEASE_API });
             if (!res.ok) {
                 throw new Error(`GitHub API returned ${res.status}`);
             }
             const release = (await res.json()) as GithubRelease;
-            if (checkGeneration !== myGeneration) return getStatus();
+            if (checkGeneration !== myGeneration) {
+                diagLog('checkNow: generation stale after fetch — discarding', { myGeneration, checkGeneration });
+                return getStatus();
+            }
             lastChecked = Date.now();
             lastError = null;
 
@@ -310,7 +363,9 @@ async function checkNowLinux(): Promise<UpdateStatus> {
             }
             const remoteSha = release.target_commitish;
             const shortSha = remoteSha.slice(0, 7);
-            const decision = linuxUpdateDecision(readBakedSha(), remoteSha, linuxDownloadedSha);
+            const bakedSha = readBakedSha();
+            const decision = linuxUpdateDecision(bakedSha, remoteSha, linuxDownloadedSha);
+            diagLog('checkNow: decision computed', { bakedSha, remoteSha, linuxDownloadedSha, decision, lastChecked });
 
             // Running build IS the latest nightly — nothing to do.
             if (decision === 'idle') {
@@ -345,6 +400,7 @@ async function checkNowLinux(): Promise<UpdateStatus> {
             if (checkGeneration !== myGeneration) return getStatus();
             const message = err instanceof Error ? err.message : String(err);
             console.error('[update-manager] Linux checkNow failed:', message);
+            diagLog('checkNow: failed', { message });
             lastError = message;
             activeState = 'error';
         }
@@ -367,6 +423,14 @@ async function checkNowLinux(): Promise<UpdateStatus> {
 export function init(channel: UpdateChannel = 'stable'): void {
     currentChannel = channel;
     if (isLinux) {
+        const buildInfo = readBuildInfo();
+        diagLog('init', {
+            platform: process.platform,
+            appImagePath: process.env.APPIMAGE ?? null,
+            channel,
+            buildSha: buildInfo.sha,
+            coreSha: buildInfo.coreSha,
+        });
         initialCheckTimer = setTimeout(() => {
             initialCheckTimer = null;
             void checkNow();
@@ -573,10 +637,12 @@ export async function checkNow(): Promise<UpdateStatus> {
 export function applyAndRestart(): UpdateStatus {
     if (isLinux) {
         const appImagePath = process.env.APPIMAGE;
+        diagLog('applyAndRestart: called', { appImagePath: appImagePath ?? null, activeState });
         if (!appImagePath) {
             return { status: 'unsupported', platform: 'linux' };
         }
         if (activeState !== 'downloaded' || !pendingDownloaded) {
+            diagLog('applyAndRestart: nothing staged', { activeState, pendingDownloaded });
             return {
                 status: 'error',
                 channel: currentChannel,
@@ -590,10 +656,12 @@ export function applyAndRestart(): UpdateStatus {
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             console.error('[update-manager] Linux relaunch failed:', message);
+            diagLog('applyAndRestart: spawn failed', { message });
             lastError = message;
             activeState = 'error';
             return getStatus();
         }
+        diagLog('applyAndRestart: spawned relaunch, quitting');
         setImmediate(() => app.quit());
         return getStatus();
     }

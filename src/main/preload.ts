@@ -30,6 +30,7 @@ import {
     IPC_UPDATE_EVENT_AVAILABLE,
     IPC_UPDATE_EVENT_DOWNLOADED,
     IPC_UPDATE_EVENT_PROGRESS,
+    IPC_UPDATE_EVENT_DIAG,
     IPC_POWER_SET_SCREEN_AWAKE,
     IPC_WINDOW_GET_START_FULLSCREEN,
     IPC_WINDOW_SET_START_FULLSCREEN,
@@ -48,6 +49,7 @@ export type UpdateChannel = 'stable' | 'rc' | 'beta' | 'alpha' | 'nightly';
 export interface UpdateAvailablePayload { version: string; channel: UpdateChannel }
 export interface UpdateDownloadedPayload { version: string; channel: UpdateChannel }
 export interface UpdateProgressPayload { percent: number; channel: UpdateChannel }
+export interface UpdateDiagPayload { ts: number; message: string; data: Record<string, unknown> | null }
 
 // Audio setDevice payload — duplex when input/output types match and device
 // names match (or both empty); split otherwise. NodeAddon validates the
@@ -582,6 +584,15 @@ const feedBackDesktopApi = {
             const listener = (_event: unknown, payload: UpdateProgressPayload) => callback(payload);
             ipcRenderer.on(IPC_UPDATE_EVENT_PROGRESS, listener);
             return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_PROGRESS, listener);
+        },
+        // Diagnostic trace of main-process update decisions (Linux path).
+        // The renderer subscribes once and console.logs these so they land
+        // in diagnostics.js's exportable console ring buffer alongside the
+        // renderer's own [update-diag] logs.
+        onDiag: (callback: (payload: UpdateDiagPayload) => void) => {
+            const listener = (_event: unknown, payload: UpdateDiagPayload) => callback(payload);
+            ipcRenderer.on(IPC_UPDATE_EVENT_DIAG, listener);
+            return () => ipcRenderer.removeListener(IPC_UPDATE_EVENT_DIAG, listener);
         },
     },
     // Keep the OS display/screensaver awake while a song plays. slopsmith core
