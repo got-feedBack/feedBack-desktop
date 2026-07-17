@@ -258,6 +258,10 @@ function readBakedSha(): string | null {
 function startLinuxDownload(url: string, appImagePath: string, remoteSha: string, shortSha: string, myGeneration: number): void {
     if (linuxDownloadInFlight) return;
     diagLog('download start', { url, appImagePath, remoteSha });
+    // Declared outside the try block (not computed from response data) so the
+    // catch handler can always clean up a partially-written file, even if
+    // fetch/pipeline fails before any bytes are written.
+    const tmpPath = `${appImagePath}.new`;
     linuxDownloadInFlight = (async (): Promise<void> => {
         try {
             const dl = await fetch(url);
@@ -267,7 +271,6 @@ function startLinuxDownload(url: string, appImagePath: string, remoteSha: string
             // Stream to disk rather than buffering the whole ~1.5GB AppImage in
             // memory. Download next to the running AppImage so the rename below
             // stays on the same filesystem (required for it to be atomic).
-            const tmpPath = `${appImagePath}.new`;
             const total = Number(dl.headers.get('content-length')) || 0;
             let received = 0;
             let lastPercent = -1;
@@ -295,20 +298,30 @@ function startLinuxDownload(url: string, appImagePath: string, remoteSha: string
             });
             const body = Readable.fromWeb(dl.body as Parameters<typeof Readable.fromWeb>[0]);
             await pipeline(body, counter, fs.createWriteStream(tmpPath));
+
+            // Check staleness BEFORE touching the real AppImage — a channel
+            // switch or new check mid-download must not let an abandoned
+            // download overwrite the running file. (Previously this check ran
+            // after chmod+rename, so a stale download would silently replace
+            // appImagePath anyway; only the in-memory state update was skipped.)
+            if (checkGeneration !== myGeneration) {
+                diagLog('download finished but generation is stale — discarding', { myGeneration, checkGeneration });
+                fs.rmSync(tmpPath, { force: true });
+                return;
+            }
             fs.chmodSync(tmpPath, 0o755);
             fs.renameSync(tmpPath, appImagePath);
             linuxDownloadedSha = remoteSha;
-
-            if (checkGeneration !== myGeneration) {
-                diagLog('download finished but generation is stale — discarding', { myGeneration, checkGeneration });
-                return;
-            }
             pendingDownloaded = { version: shortSha };
             activeState = 'downloaded';
             downloadPercent = null;
             diagLog('download complete, swapped in', { received, appImagePath });
             broadcast(IPC_UPDATE_EVENT_DOWNLOADED, { version: shortSha, channel: currentChannel });
         } catch (err) {
+            // Best-effort cleanup of a partially-written temp file. force:true
+            // tolerates the file never having been created (e.g. fetch itself
+            // failed before the pipeline started).
+            fs.rmSync(tmpPath, { force: true });
             if (checkGeneration !== myGeneration) return;
             const message = err instanceof Error ? err.message : String(err);
             console.error('[update-manager] Linux download failed:', message);
@@ -659,7 +672,26 @@ export function applyAndRestart(): UpdateStatus {
             };
         }
         try {
-            spawn(appImagePath, [], { detached: true, stdio: 'ignore' }).unref();
+            const child = spawn(appImagePath, [], { detached: true, stdio: 'ignore' });
+            // spawn() can fail asynchronously (e.g. exec format error, a
+            // permissions race on the just-swapped-in file) rather than
+            // throwing synchronously — only quit once 'spawn' confirms the OS
+            // actually started the process. On 'error', leave the app running
+            // (state still 'downloaded' unless we mark it 'error' below) so
+            // the user can see something went wrong and retry, instead of the
+            // app just disappearing with nothing coming back.
+            child.once('spawn', () => {
+                diagLog('applyAndRestart: spawned relaunch, quitting');
+                app.quit();
+            });
+            child.once('error', (err) => {
+                const message = err instanceof Error ? err.message : String(err);
+                console.error('[update-manager] Linux relaunch failed:', message);
+                diagLog('applyAndRestart: spawn failed', { message });
+                lastError = message;
+                activeState = 'error';
+            });
+            child.unref();
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             console.error('[update-manager] Linux relaunch failed:', message);
@@ -668,8 +700,6 @@ export function applyAndRestart(): UpdateStatus {
             activeState = 'error';
             return getStatus();
         }
-        diagLog('applyAndRestart: spawned relaunch, quitting');
-        setImmediate(() => app.quit());
         return getStatus();
     }
     if (!velopackUm) {
