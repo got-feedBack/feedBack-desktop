@@ -11,6 +11,11 @@ import * as net from 'net';
 import * as os from 'os';
 import { getActiveSoundfontPath, getDesktopConfig } from './soundfont-manager';
 import { isDebugEnabled } from './debug-log';
+import {
+    applyLibraryPathToPythonEnvironment,
+    normalizeExistingLibraryDirectory,
+    prepareLibraryPathForPython,
+} from './library-path-config';
 
 let pythonProcess: ChildProcess | null = null;
 // A backend that is being *gracefully* stopped (SIGTERM sent, async SIGKILL
@@ -423,8 +428,8 @@ function getPluginsDir(): string {
     return pluginsDir;
 }
 
-function getDLCDir(): string {
-    if (process.env.DLC_DIR && fs.existsSync(process.env.DLC_DIR)) return process.env.DLC_DIR;
+function getDLCDir(explicitDlcDir = normalizeExistingLibraryDirectory(process.env.DLC_DIR)): string {
+    if (explicitDlcDir) return explicitDlcDir;
 
     // Read from shared config
     const configFile = path.join(getConfigDir(), 'config.json');
@@ -496,7 +501,8 @@ export async function startPython(): Promise<void> {
     }
     serverPort = await findPort(PREFERRED_PORT);
     const configDir = getConfigDir();
-    const dlcDir = getDLCDir();
+    const explicitDlcDir = normalizeExistingLibraryDirectory(process.env.DLC_DIR);
+    const dlcDir = getDLCDir(explicitDlcDir);
     // Ensure the resolved library folder exists before the server starts. The
     // Python side only seeds starter content (and scans) when DLC_DIR.is_dir()
     // is true, and it can't bootstrap the folder itself (the seed's mkdir runs
@@ -507,6 +513,15 @@ export async function startPython(): Promise<void> {
         fs.mkdirSync(dlcDir, { recursive: true });
     } catch (err) {
         console.warn(`[python] could not create DLC dir ${dlcDir}:`, err);
+    }
+    // Preserve a caller-supplied DLC_DIR as an explicit administrator override.
+    // Normal desktop launches bootstrap the initial/default path into config.json
+    // instead. The backend re-reads that file for every scan, so a path saved in
+    // Settings takes effect immediately rather than being shadowed by the
+    // startup path until the Python process restarts.
+    const libraryPath = prepareLibraryPathForPython(configDir, dlcDir, explicitDlcDir);
+    if (libraryPath.error) {
+        console.warn(`[python] could not prepare dynamic library path (${libraryPath.status}): ${libraryPath.error}`);
     }
     const pluginsDir = getPluginsDir();
     const slopsmithPlugins = path.join(slopsmithDir, 'plugins');
@@ -558,7 +573,6 @@ export async function startPython(): Promise<void> {
         ...process.env as Record<string, string>,
         PYTHONPATH: pythonPathEnv,
         CONFIG_DIR: configDir,
-        DLC_DIR: dlcDir,
         SLOPSMITH_PLUGINS_DIR: pluginsDir,
         HOME: homeDir,
         XDG_CACHE_HOME: cacheBase,
@@ -572,6 +586,9 @@ export async function startPython(): Promise<void> {
             : path.join(__dirname, '..', '..', 'resources', 'bin') + path.delimiter
         ) + (process.env.PATH || ''),
     };
+    // `...process.env` may carry an empty/invalid value. Do not let it shadow
+    // config.json in the normal dynamic-settings path.
+    applyLibraryPathToPythonEnvironment(pythonEnv, libraryPath);
 
     // Debug mode: raise the Slopsmith server's log level and tee its
     // structured logs to a file. lib/logging_setup.py reads LOG_LEVEL and
