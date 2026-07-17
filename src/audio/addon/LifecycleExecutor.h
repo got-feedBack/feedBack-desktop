@@ -70,14 +70,9 @@ inline bool runLifecycleOpOk(const char* name, std::function<void()> func,
            == LifecycleOpResult::completed;
 }
 
-// Pin a plugin module so the OS never unloads it for the life of the
-// process (guide §12 P0 item 4). JUCE refcounts VST3 modules and unloads
-// them when the last instance dies; a window/timer message already queued
-// to that module's code then fires into unmapped or reused pages — the CFG
-// fail-fast (0xc0000409 / FAST_FAIL_GUARD_ICALL_CHECK_FAILURE) in the
-// 2026-07-17 dumps. The pin is by module base name (the inner
-// x86_64-win/*.vst3 file JUCE actually loads shares the bundle's base
-// name). No-op off Windows and for modules that are not currently loaded.
-void pinPluginModuleForever(const char* fileOrIdentifierUtf8);
+// Plugin-module pinning (guide §12 P0 item 4) lives in PluginModulePin.h —
+// header-only, because VSTHost.cpp is compiled into targets across three
+// CMake projects and an out-of-line definition broke the ones that don't
+// build this executor (PR #120 CI).
 
 } // namespace slopsmith::addon

@@ -63,7 +63,6 @@ endfunction()
 set(VST_HOST_SOURCES
     main.cpp
     ../audio/VSTHost.cpp
-    ../audio/addon/LifecycleExecutor.cpp
     ../audio/Sandbox/Protocol.cpp
     ../audio/Sandbox/ControlChannel_shared.cpp
     ../audio/Sandbox/AudioChannel_shared.cpp

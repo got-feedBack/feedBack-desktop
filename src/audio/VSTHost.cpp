@@ -1,6 +1,6 @@
 #include "VSTHost.h"
 #include "VSTTrace.h"
-#include "addon/LifecycleExecutor.h"
+#include "addon/PluginModulePin.h"
 
 // The out-of-process scan path is compiled only into the audio addon
 // (SLOPSMITH_AUDIO_ADDON, set in src/audio/CMakeLists.txt). slopsmith-vst-host

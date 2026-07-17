@@ -7,13 +7,9 @@
 
 #include <atomic>
 #include <cstdio>
+#include <exception>
 #include <memory>
 #include <mutex>
-
-#if JUCE_WINDOWS
- #define WIN32_LEAN_AND_MEAN
- #include <windows.h>
-#endif
 
 namespace slopsmith::addon {
 
@@ -50,9 +46,17 @@ LifecycleOpResult runLifecycleOp(const char* name,
         return LifecycleOpResult::neverRan;
     }
 
-    // Already on the message thread (engine init path, macOS inline mode):
-    // dispatch-and-wait on ourselves would deadlock. Run inline — we are by
-    // definition serialized with every queued op.
+    // Already on the message thread (engine init path, macOS inline mode,
+    // or a lifecycle op submitting a nested op): dispatch-and-wait on
+    // ourselves would deadlock, so run inline.
+    //
+    // Ordering note (CodeRabbit #120): an inline op runs as part of the
+    // CURRENT message-thread turn, i.e. ahead of ops still queued behind
+    // it. That is intentional, not a FIFO leak: a nested submission is
+    // semantically part of the outer op and must complete inside it, and a
+    // message-thread caller can never interleave with a *running* op — the
+    // queue drains on this very thread. The FIFO contract is between
+    // off-thread submitters, which all take the queued path below.
     if (mm->isThisTheMessageThread())
     {
         if (stamped != currentEngineGeneration())
@@ -60,7 +64,13 @@ LifecycleOpResult runLifecycleOp(const char* name,
             fprintf(stderr, "[lifecycle] op '%s': stale generation (inline); skipped\n", name);
             return LifecycleOpResult::stale;
         }
-        func();
+        try { func(); }
+        catch (const std::exception& e) {
+            fprintf(stderr, "[lifecycle] op '%s' (inline) threw: %s\n", name, e.what());
+        }
+        catch (...) {
+            fprintf(stderr, "[lifecycle] op '%s' (inline) threw (unknown)\n", name);
+        }
         return LifecycleOpResult::completed;
     }
 
@@ -86,7 +96,16 @@ LifecycleOpResult runLifecycleOp(const char* name,
                 }
                 else
                 {
-                    func();
+                    // Always reach the signal below: a throwing op would
+                    // otherwise leave its unbounded caller waiting forever
+                    // (CodeRabbit #120).
+                    try { func(); }
+                    catch (const std::exception& e) {
+                        fprintf(stderr, "[lifecycle] op '%s' threw: %s\n", name, e.what());
+                    }
+                    catch (...) {
+                        fprintf(stderr, "[lifecycle] op '%s' threw (unknown)\n", name);
+                    }
                 }
                 shared->done.signal();
             });
@@ -131,37 +150,6 @@ LifecycleOpResult runLifecycleOp(const char* name,
     return shared->wasStale.load(std::memory_order_acquire)
                ? LifecycleOpResult::stale
                : LifecycleOpResult::completed;
-}
-
-void pinPluginModuleForever(const char* fileOrIdentifierUtf8)
-{
-#if JUCE_WINDOWS
-    // JUCE loads the inner <bundle>/Contents/x86_64-win/<name>.vst3 (or a
-    // flat .vst3/.dll); either way the loaded module's base name is the
-    // path's final component. Pin by that name so the loader never unloads
-    // it, even when JUCE's module refcount hits zero.
-    const juce::String path = juce::String::fromUTF8(fileOrIdentifierUtf8);
-    const juce::String base = path.replaceCharacter('\\', '/')
-                                  .fromLastOccurrenceOf("/", false, false);
-    if (base.isEmpty())
-        return;
-
-    HMODULE h = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN,
-                           base.toWideCharPointer(), &h))
-    {
-        fprintf(stderr, "[lifecycle] pinned plugin module '%s' for process "
-                        "lifetime\n", base.toRawUTF8());
-    }
-    // Not currently loaded under that name (sandboxed plugin, or the inner
-    // file is named differently): nothing to pin — the sandbox child owns
-    // its own modules, and an in-process module we can't resolve here was
-    // loaded under some other base name and will be pinned on a later load
-    // if it ever resolves. Silent by design; this is a belt on JUCE's
-    // refcount braces, not a correctness gate.
-#else
-    (void) fileOrIdentifierUtf8;
-#endif
 }
 
 } // namespace slopsmith::addon
