@@ -481,6 +481,13 @@ export function init(channel: UpdateChannel = 'stable'): void {
  * nightly checker.
  */
 export function setChannel(channel: UpdateChannel): void {
+    // Unconditional, including the no-op path below — this is the one call
+    // site that mutates currentChannel, and prior diagnostic exports only
+    // ever showed its DOWNSTREAM effects (a checkNow() landing on the wrong
+    // channel), never the call itself, its caller, or whether it was a
+    // genuine transition vs a same-value no-op. Logging every attempt here
+    // is what actually answers "why does the channel keep flipping."
+    diagLog('setChannel called', { from: currentChannel, to: channel, isNoOp: channel === currentChannel, checkGeneration });
     if (channel === currentChannel && (isLinux || velopackUm)) return;
     currentChannel = channel;
     pendingVersion = null;
