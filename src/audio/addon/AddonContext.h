@@ -20,6 +20,7 @@
 
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
+#include "LifecycleExecutor.h"
 
 #include <juce_events/juce_events.h>
 
@@ -74,36 +75,26 @@ inline bool dispatchOnMessageThread(Func&& func)
 // caller already IS the message thread (engine init runs there), because
 // dispatch-and-wait from the message thread would deadlock.
 //
-// Returns false when the dispatched work did not verifiably complete (post
-// refused or 15 s timeout) — same contract as dispatchOnMessageThread.
-// CAPTURE RULE: on timeout the queued closure may still run later, so the
-// closure must own everything it touches — capture by value (engine
-// snapshot, args) and write results through a shared_ptr, never through
-// references to the caller's stack.
-//
-// KNOWN LIMITATION (timeout desync): when the 15 s wait expires the binding
-// reports failure to JS, but the closure may still complete afterwards —
-// e.g. addSource returns -1 yet the source gets created, holding its input
-// device until the next reconfigure. Memory-safe by the capture rule above,
-// just not logically reconciled; only reachable with the message thread
-// jammed > 15 s. Callers that care can re-query engine state (listSources,
-// getCurrentDevice) after a reported failure.
+// P0 (guide §12): routed through the LifecycleExecutor. False now means the
+// op verifiably did NOT run (pump gone, or the engine generation moved while
+// it was queued) — the old "false but it may still run later" desync state
+// is gone. The wait is unbounded; a watchdog logs every 15 s while a driver
+// call blocks the message thread.
+// CAPTURE RULE unchanged: the closure must own everything it touches —
+// capture by value (engine snapshot, args) and write results through a
+// shared_ptr, never through references to the caller's stack.
 template <typename Func>
 inline bool runDeviceLifecycleOp(Func&& func)
 {
 #if JUCE_WINDOWS
-    // No MessageManager means the pump is gone (pre-init or mid-shutdown):
-    // report failure instead of running the mutation unserialised on the
-    // caller's thread — that would reintroduce the race this helper exists
-    // to prevent (CodeRabbit #113 review).
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
-    if (mm == nullptr)
-        return false;
-    if (!mm->isThisTheMessageThread())
-        return dispatchOnMessageThread(std::forward<Func>(func));
-#endif
+    return runLifecycleOpOk("device-lifecycle",
+                            std::function<void()>(std::forward<Func>(func)));
+#else
+    // macOS: dispatch runs inline (no separate pump). Linux/ALSA keeps its
+    // long-standing "called from the Node main thread" contract untouched.
     func();
     return true;
+#endif
 }
 
 // Pending-async-load registry: LoadVSTWorker / LoadPresetWorker block on a

@@ -164,6 +164,10 @@ void initialize(std::function<void()> uiTeardownHook)
     // instead of treating it as already-done.
     alreadyShutDown.store(false, std::memory_order_release);
 
+    // New engine lifetime: ops still queued against the previous engine
+    // (or a previous failed init) are stale from here on.
+    bumpEngineGeneration();
+
     // Start JUCE message thread first (no-op on macOS)
     startJuceMessageThread();
 
@@ -172,8 +176,13 @@ void initialize(std::function<void()> uiTeardownHook)
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 #endif
 
-    // Create engine on the JUCE message thread (or inline on macOS)
-    const bool initialized = dispatchOnMessageThread([]() {
+    // Create engine on the JUCE message thread (or inline on macOS).
+    // Unbounded wait (P0): on machines where the first device enumeration
+    // blocks the message thread for minutes (Focusrite ASIO, 2026-07-17
+    // dumps), init completes late instead of "failing" while the engine
+    // appears anyway — the desync that left JS driving a half-initialized
+    // addon.
+    const bool initialized = runLifecycleOpOk("engine-init", []() {
         std::shared_ptr<AudioEngine> liveEngine;
         {
             std::lock_guard<std::mutex> lock(engineMutex);
@@ -194,8 +203,9 @@ void initialize(std::function<void()> uiTeardownHook)
                     types[i].outputDevices.size());
     });
     if (!initialized)
-        fprintf(stderr, "[audio-native] initialize: engine creation did not complete "
-                        "on the message thread; audio bindings will no-op until re-init\n");
+        fprintf(stderr, "[audio-native] initialize: engine creation did not run "
+                        "(pump gone or generation moved); audio bindings will "
+                        "no-op until re-init\n");
 }
 
 void doShutdown()
@@ -217,6 +227,12 @@ void doShutdown()
     bool expected = false;
     if (!alreadyShutDown.compare_exchange_strong(expected, true)) return;
 
+    // Invalidate every lifecycle op still queued against the live engine:
+    // they run before our teardown op (FIFO) but must not touch a dying
+    // engine's devices. The teardown op below is stamped AFTER this bump,
+    // so it alone survives the generation check.
+    bumpEngineGeneration();
+
     // Release any LoadVSTWorker / LoadPresetWorker currently blocked on a
     // pending async load. Without this they'd wait forever on the
     // WaitableEvent — the createPluginInstanceAsync callback can't fire
@@ -225,7 +241,10 @@ void doShutdown()
 
     if (juceRunning.load() || snapshotEngine() || snapshotVstHost())
     {
-        const bool toreDown = dispatchOnMessageThread([]() {
+        // Bounded wait — the ONE bounded caller (LifecycleExecutor.h): at
+        // process exit, leaking the pump beats hanging exit forever behind
+        // a wedged driver call.
+        const bool toreDown = runLifecycleOpOk("engine-shutdown", []() {
             // Editors reference their slot's processor; engine.reset() below
             // frees the whole chain, so destroy the editor windows first (#56).
             if (shutdownUiTeardown) shutdownUiTeardown();
@@ -239,7 +258,7 @@ void doShutdown()
                 std::lock_guard<std::mutex> lock(vstHostMutex);
                 vstHost.reset();
             }
-        });
+        }, /*maxWaitMs=*/60000);
         if (!toreDown)
         {
             // Editor teardown / stopAudio / engine destruction have NOT

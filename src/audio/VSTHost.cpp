@@ -1,5 +1,6 @@
 #include "VSTHost.h"
 #include "VSTTrace.h"
+#include "addon/LifecycleExecutor.h"
 
 // The out-of-process scan path is compiled only into the audio addon
 // (SLOPSMITH_AUDIO_ADDON, set in src/audio/CMakeLists.txt). slopsmith-vst-host
@@ -513,6 +514,13 @@ std::unique_ptr<juce::AudioPluginInstance> VSTHost::loadPlugin(
         return nullptr;
     }
 
+    // P0 (guide §12): never unload a plugin module mid-session. JUCE frees
+    // the module when its last instance dies; a message already queued to a
+    // window/timer in that module then indirect-calls into unmapped code —
+    // the CFG fail-fast in the 2026-07-17 field dumps.
+    slopsmith::addon::pinPluginModuleForever(
+        matchedDesc.fileOrIdentifier.toRawUTF8());
+
     return instance;
 }
 
@@ -568,7 +576,8 @@ void VSTHost::loadPluginAsync(
     // copy threads through both lambda hops.
     formatManager.createPluginInstanceAsync(
         matchedDesc, sampleRate, blockSize,
-        [cb = std::move(callback), name = matchedDesc.name]
+        [cb = std::move(callback), name = matchedDesc.name,
+         fileOrId = matchedDesc.fileOrIdentifier]
         (std::unique_ptr<juce::AudioPluginInstance> instance, const juce::String& error)
         {
             VST_TRACE("VSTHost.loadPluginAsync: createPluginInstanceAsync END    "
@@ -584,6 +593,8 @@ void VSTHost::loadPluginAsync(
                                       : juce::String("Failed to create plugin instance"));
                 return;
             }
+            // P0: pin — see the sync loadPlugin path for rationale.
+            slopsmith::addon::pinPluginModuleForever(fileOrId.toRawUTF8());
             cb(std::move(instance), {});
         });
 }

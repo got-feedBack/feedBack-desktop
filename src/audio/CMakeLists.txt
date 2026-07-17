@@ -12,6 +12,7 @@ set(AUDIO_SOURCES
     engine/SourcePool.cpp
     engine/ExtraInputs.cpp
     addon/AddonContext.cpp
+    addon/LifecycleExecutor.cpp
     addon/ChainOps.cpp
     addon/EditorWindows.cpp
     addon/DeviceBindings.cpp

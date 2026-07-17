@@ -86,35 +86,22 @@ void destroyAllPluginEditorWindowsOnMessageThread()
 //     timeout so a lingering-editor UAF stays diagnosable.
 bool closeAllPluginEditorWindows()
 {
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
-    if (mm != nullptr && mm->isThisTheMessageThread())
+    // P0 (guide §12): serialized behind every other lifecycle op with an
+    // unbounded wait — the old 15 s give-up let a caller proceed to free
+    // slot processors while this teardown was still queued (#56, delayed).
+    // A false return now means the teardown verifiably did NOT run (pump
+    // gone / generation moved) — callers still must not free processors on
+    // false, but there is no longer a "maybe it runs later" state.
+    // Note: inline execution when already on the message thread is handled
+    // inside runLifecycleOp.
+    const bool toreDown = runLifecycleOpOk("editor-teardown", []()
     {
         destroyAllPluginEditorWindowsOnMessageThread();
-        return true;
-    }
-
-    auto done = std::make_shared<juce::WaitableEvent>();
-    const bool posted = juce::MessageManager::callAsync([done]()
-    {
-        destroyAllPluginEditorWindowsOnMessageThread();
-        done->signal();
     });
-    if (!posted)
-    {
-        fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: message queue refused the post; "
-                        "editors may still be alive\n");
-        return false;
-    }
-    if (!done->wait(15000))
-    {
-        // The queued teardown hasn't run: editors may still hold pointers into
-        // the chain. Callers must NOT free slot processors on a false return —
-        // proceeding here is exactly the #56 use-after-free, just delayed.
-        fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: editor teardown did not complete "
-                        "within 15s; caller must not free chain processors\n");
-        return false;
-    }
-    return true;
+    if (!toreDown)
+        fprintf(stderr, "[audio-native] closeAllPluginEditorWindows: teardown did "
+                        "not run; caller must not free chain processors\n");
+    return toreDown;
 }
 
 Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
