@@ -5,6 +5,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Route compiles through ccache when it's installed (the Docker builder ships it
+# and mounts a persistent cache volume). No-op on hosts without ccache, so CI
+# and native macOS/Windows builds are unaffected.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    message(STATUS "ccache found — using it as compiler launcher: ${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
 # cmake-js integration
 if(DEFINED CMAKE_JS_INC)
     message(STATUS "Building as Node.js native addon (cmake-js)")

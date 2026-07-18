@@ -79,6 +79,29 @@ get_cfg() { python3 "$PARSE_CONFIG" "$CONFIG" "$1"; }
 
 # --- Common Build Steps ---
 
+# Clone $authed_url into $dir at $ref, OR update an existing checkout in place so
+# a persistent clone dir (Docker volume) is reused across builds instead of
+# re-downloading ~49 repos every run. $authed_url carries the (rotating) auth
+# token; the stored remote is rewritten to the token-free $plain_url so the reuse
+# check stays stable as the token changes each run. Uses `reset --hard` (not
+# `clean`) on purpose: the core checkout has the plugin dirs nested under it as
+# untracked children, and clean would wipe them. Falls back to a fresh clone when
+# the dir is absent, is a different repo, or the fetch fails — so a cold CI runner
+# (no cache volume) behaves exactly as a plain `git clone` did.
+clone_or_update() {
+	local authed_url="$1" dir="$2" ref="${3:-}" plain_url="$4"
+	if [[ -d "$dir/.git" && "$(git -C "$dir" config --get remote.origin.url 2>/dev/null)" == "$plain_url" ]]; then
+		if git -C "$dir" fetch --depth 1 "$authed_url" ${ref:+"$ref"} 2>/dev/null \
+			&& git -C "$dir" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+			return 0
+		fi
+		# fetch/reset failed (deleted branch, corrupt cache) — fall through.
+	fi
+	rm -rf "$dir"
+	git clone --depth 1 ${ref:+--branch "$ref"} "$authed_url" "$dir" || return 1
+	git -C "$dir" remote set-url origin "$plain_url"
+}
+
 # Clone Slopsmith and plugins (shared across all platforms)
 clone_slopsmith() {
 	# RUNNER_TEMP on Windows runners is a native Windows path
@@ -87,7 +110,10 @@ clone_slopsmith() {
 	# default; if a non-POSIX environment really wants RUNNER_TEMP, it
 	# can pass an explicit clone_dir argument (resolved via cygpath -u
 	# on Windows if needed).
-	local clone_dir="${1:-/tmp/slopsmith}"
+	# clone_dir defaults to /tmp/slopsmith (fresh every CI run). Set
+	# SLOPSMITH_CLONE_DIR to a persistent path (a Docker volume, wired by
+	# build-linux-docker.sh) to reuse the clone across local builds.
+	local clone_dir="${1:-${SLOPSMITH_CLONE_DIR:-/tmp/slopsmith}}"
 
 	# Skip if already set for local development
 	if [[ -n "${SLOPSMITH_DIR:-}" ]] && [[ -d "$SLOPSMITH_DIR" ]]; then
@@ -95,22 +121,22 @@ clone_slopsmith() {
 		return 0
 	fi
 
-	# Make the clone re-runnable: a leftover dir from a previous failed
-	# build would otherwise abort `git clone`. CI runners start fresh so
-	# this is purely a quality-of-life fix for local re-runs.
-	if [[ -d "$clone_dir" ]]; then
-		rm -rf "$clone_dir"
-	fi
-
 	# SLOPSMITH_REF selects the core branch/tag to bundle (set by the
 	# Build workflow's slopsmith_ref input). Defaults to main so local
 	# builds and the push/tag CI paths behave exactly as before.
 	# --branch accepts either a branch or a tag, both shallow-cloneable.
 	local slopsmith_ref="${SLOPSMITH_REF:-main}"
+	# SLOPSMITH_REPO overrides the core repo (default got-feedback/feedback),
+	# mirroring SLOPSMITH_REF. Lets a contributor without push access to the
+	# core repo bundle a branch pushed to their own fork for a test build:
+	#   SLOPSMITH_REPO=me/feedBack SLOPSMITH_REF=my-branch
+	local slopsmith_repo="${SLOPSMITH_REPO:-got-feedback/feedback}"
 	local _auth=""
 	[[ -n "${GH_CLONE_TOKEN:-}" ]] && _auth="x-access-token:${GH_CLONE_TOKEN}@"
-	echo "Cloning Slopsmith repository (ref: ${slopsmith_ref})..."
-	git clone --depth 1 --branch "$slopsmith_ref" "https://${_auth}github.com/got-feedback/feedback.git" "$clone_dir"
+	# mkdir -p the parent so a volume-mounted clone_dir subpath works.
+	mkdir -p "$(dirname "$clone_dir")"
+	echo "Cloning/updating Slopsmith repository (${slopsmith_repo} ref: ${slopsmith_ref})..."
+	clone_or_update "https://${_auth}github.com/${slopsmith_repo}.git" "$clone_dir" "$slopsmith_ref" "https://github.com/${slopsmith_repo}.git"
 
 	# Remove broken symlinks from plugins dir
 	find "$clone_dir/plugins" -maxdepth 1 -type l -delete 2>/dev/null || true
@@ -174,6 +200,7 @@ clone_slopsmith() {
 
 	local total=0
 	local cloned=0
+	local expected_dirnames=()
 	for entry in "${plugins[@]}"; do
 		total=$((total + 1))
 		# Split off an optional ":<dirname>" then an optional "@<branch>".
@@ -194,14 +221,44 @@ clone_slopsmith() {
 			dirname="${dirname#feedback-plugin-}"
 			dirname="${dirname//-/_}"
 		fi
-		local clone_args=(--depth 1)
-		[[ -n "$branch" ]] && clone_args+=(--branch "$branch")
-		if git clone "${clone_args[@]}" "https://${_auth}github.com/${owner_repo}.git" "$dirname" 2>/dev/null; then
+		expected_dirnames+=("$dirname")
+		# clone_or_update reuses a cached plugin checkout (persistent clone_dir)
+		# and honors the optional @branch pin via $branch; a fresh dir falls back
+		# to a full shallow clone. dirname is relative to the plugins/ cwd.
+		if clone_or_update "https://${_auth}github.com/${owner_repo}.git" "$dirname" "$branch" "https://github.com/${owner_repo}.git" 2>/dev/null; then
 			cloned=$((cloned + 1))
 		else
 			echo " skipped ${owner_repo}${branch:+@$branch}"
 		fi
 	done
+
+	# Prune plugins no longer configured. clone_or_update's `reset --hard` (not
+	# `clean`) deliberately preserves sibling directories — needed so a
+	# persistent cache survives repeated core-repo updates — but that means a
+	# plugin removed or renamed here would otherwise leave its old clone behind
+	# forever, and bundle-slopsmith.sh bundles every directory under plugins/
+	# (globs "$SLOPSMITH_DIR/plugins/"*), so a stale clone would ship into the
+	# app. Track dirnames this loop has managed across runs in a manifest (a
+	# dotfile, so that glob skips it) and delete any previously-managed
+	# dirname that's absent from this run's list. Never touches a directory
+	# we didn't create ourselves (e.g. anything that's part of the core repo's
+	# own tracked tree, which isn't in the manifest).
+	local manifest="$clone_dir/plugins/.managed-plugins"
+	if [[ -f "$manifest" ]]; then
+		local prior_dirname still_wanted d
+		while IFS= read -r prior_dirname; do
+			[[ -n "$prior_dirname" ]] || continue
+			still_wanted=0
+			for d in "${expected_dirnames[@]}"; do
+				[[ "$d" == "$prior_dirname" ]] && still_wanted=1 && break
+			done
+			if [[ "$still_wanted" == "0" && -d "$clone_dir/plugins/$prior_dirname" ]]; then
+				echo "  Pruning stale cached plugin: $prior_dirname"
+				rm -rf "$clone_dir/plugins/$prior_dirname"
+			fi
+		done < "$manifest"
+	fi
+	printf '%s\n' "${expected_dirnames[@]}" > "$manifest"
 
 	# Strip dangling symlinks from the bundled tree. Some plugins ship
 	# build-time symlinks into sources that aren't present at runtime (e.g.
@@ -288,6 +345,15 @@ install_npm_deps() {
 
 build_native_addons() {
     echo_step "Building native addons (audio engine)"
+    # FAST_BUILD reuses the native .node from the previous build (the whole
+    # C++/JUCE compile — by far the biggest cost under amd64 emulation). Only
+    # skips when the artifact is actually present, so a FAST_BUILD run with no
+    # prior full build still compiles instead of shipping a broken app.
+    if [[ "${FAST_BUILD:-0}" == "1" && -f "$PROJECT_DIR/build/Release/slopsmith_audio.node" ]]; then
+        echo_warning "FAST_BUILD: reusing existing build/Release/slopsmith_audio.node"
+        echo ""
+        return 0
+    fi
     npm run build:native
     echo_summary "Native addons built"
     echo ""
@@ -302,6 +368,13 @@ bundle_slopsmith() {
 
 bundle_python() {
     mkdir -p "$PROJECT_DIR/resources"
+    # FAST_BUILD reuses the extracted python-build-standalone runtime (a network
+    # download + tar extract that never changes between JS-only iterations).
+    if [[ "${FAST_BUILD:-0}" == "1" && -x "$PROJECT_DIR/resources/python/runtime/bin/python3" ]]; then
+        echo_summary "FAST_BUILD: reusing existing resources/python/runtime"
+        echo ""
+        return 0
+    fi
     bundle_python_impl
     echo_summary "Python runtime bundled"
     echo ""
@@ -309,6 +382,13 @@ bundle_python() {
 
 bundle_binaries() {
     mkdir -p "$PROJECT_DIR/resources/bin"
+    # FAST_BUILD reuses bundled binaries (ffmpeg/fluidsynth/vgmstream + their
+    # dylib chains — includes a network fetch for vgmstream).
+    if [[ "${FAST_BUILD:-0}" == "1" && -x "$PROJECT_DIR/resources/bin/fluidsynth" ]]; then
+        echo_summary "FAST_BUILD: reusing existing resources/bin"
+        echo ""
+        return 0
+    fi
     bundle_binaries_impl
     echo_summary "System binaries bundled"
     echo ""
@@ -502,7 +582,29 @@ package_application() {
             exit 1
             ;;
     esac
-    npx electron-builder "$builder_platform" --publish never
+    local builder_args=("$builder_platform")
+    # FAST_BUILD trims packaging for local iteration, where the shipped
+    # artifact itself is throwaway: package.json's linux.target builds BOTH
+    # AppImage and deb (each separately compresses the ~2GB resources/
+    # payload), and electron-builder's default asar/7z compression is tuned
+    # for a real release, not a quick smoke test. Neither changes what's IN
+    # the app, only how it's packaged for testing — CI/non-fast builds get
+    # the full untouched config. LINUX_TARGETS/BUILDER_COMPRESSION let a
+    # caller override either independently of FAST_BUILD.
+    if [[ "$PLATFORM" == "linux" ]]; then
+        local targets="${LINUX_TARGETS:-}"
+        if [[ -z "$targets" && "${FAST_BUILD:-0}" == "1" ]]; then
+            targets="AppImage"
+        fi
+        [[ -n "$targets" ]] && builder_args+=("$targets")
+    fi
+    local compression="${BUILDER_COMPRESSION:-}"
+    if [[ -z "$compression" && "${FAST_BUILD:-0}" == "1" ]]; then
+        compression="store"
+    fi
+    [[ -n "$compression" ]] && builder_args+=("-c.compression=$compression")
+
+    npx electron-builder "${builder_args[@]}" --publish never
     echo_summary "Application packaged"
     echo ""
 }
@@ -548,6 +650,27 @@ verify_artifacts() {
     echo ""
 }
 
+# Per-step timing. run_timed records "<seconds>|<label>" so main() can print a
+# breakdown at the end — the cheapest way to see where the ~35 min actually goes
+# before optimizing further.
+STEP_TIMES=()
+run_timed() {
+    local label="$1"; shift
+    local _t0=$(date +%s)
+    "$@"
+    STEP_TIMES+=("$(( $(date +%s) - _t0 ))|$label")
+}
+
+print_timings() {
+    echo -e "${BLUE}=== Build step timings ===${NC}"
+    local entry secs label
+    for entry in "${STEP_TIMES[@]}"; do
+        secs="${entry%%|*}"
+        label="${entry#*|}"
+        printf '  %5ds  %s\n' "$secs" "$label"
+    done
+}
+
 # Main entry point - platform scripts call this
 main() {
     local start_time=$(date +%s)
@@ -586,24 +709,25 @@ main() {
 
 validate_environment
 install_system_deps
-install_npm_deps
+run_timed "npm install"        install_npm_deps
 # clone_slopsmith provides the slopsmith core + plugins that
 # bundle_slopsmith packages into the app; run it before the build steps
 # that consume $SLOPSMITH_DIR.
-clone_slopsmith
-build_native_addons
-bundle_slopsmith
-bundle_python
-bundle_binaries
+run_timed "clone core+plugins" clone_slopsmith
+run_timed "build:native (C++)" build_native_addons
+run_timed "bundle:slopsmith"   bundle_slopsmith
+run_timed "bundle python"      bundle_python
+run_timed "bundle binaries"    bundle_binaries
 verify_bundled_binaries
-bundle_soundfont
-build_typescript
-package_application
+run_timed "bundle soundfont"   bundle_soundfont
+run_timed "build:ts"           build_typescript
+run_timed "electron-builder"   package_application
 verify_artifacts
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
+    print_timings
     echo -e "${GREEN}✓${NC} Build complete for $PLATFORM in ${duration}s"
     echo "Output: $PROJECT_DIR/release/"
 }

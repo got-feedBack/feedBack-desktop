@@ -31,6 +31,15 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends $PACKAGES && \
     rm -rf /var/lib/apt/lists/*
 
+# ── ccache ──────────────────────────────────────────────────────────────────
+# Not in .packages/apt.txt (that list is kept in sync with the CI workflow by
+# hand). ccache only benefits the local Docker builder, where its cache dir is
+# a persistent volume; CMakeLists.txt picks it up via find_program and is a
+# no-op where it's absent, so CI needs no change.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ccache && \
+    rm -rf /var/lib/apt/lists/*
+
 # ── Node.js ─────────────────────────────────────────────────────────────────
 RUN . /etc/build.env && \
     curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - && \
@@ -51,6 +60,12 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 # ── Workspace ───────────────────────────────────────────────────────────────
 USER vscode
 WORKDIR /workspace
+
+# Pre-create the cache dirs that build-linux-docker.sh mounts as named volumes.
+# A fresh named volume inherits the mountpoint's ownership from the image, so
+# creating these as the vscode user means the volumes are writable without a
+# root-owned-mount permission fight (ccache, Electron download, cmake-js headers).
+RUN mkdir -p /home/vscode/.ccache /home/vscode/.cache /home/vscode/.cmake-js /home/vscode/.slopsmith-src
 
 # Runtime verification. Workspace isn't mounted at image-build time —
 # package.json only exists when the container is RUN against a mounted
