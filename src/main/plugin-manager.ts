@@ -137,13 +137,26 @@ async function installPlugin(gitUrl: string, name?: string): Promise<{ success: 
     }
 
     try {
-        await execFileAsync('git', ['clone', gitUrl, targetDir]);
+        // Partial, checkout-less clone: fetches commit/tree objects but not
+        // blob contents, so we can confirm plugin.json exists at the repo
+        // root before paying for a full checkout — or aborting entirely
+        // without ever fetching the plugin's file contents.
+        await execFileAsync('git', ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', gitUrl, targetDir]);
 
-        // Verify it has a plugin.json
-        const manifestPath = path.join(targetDir, 'plugin.json');
-        if (!fs.existsSync(manifestPath)) {
-            console.warn(`[plugins] Warning: ${name} has no plugin.json — may not be a valid Slopsmith plugin`);
+        let hasManifest = false;
+        try {
+            const out = await execFileAsync('git', ['ls-tree', '--name-only', 'HEAD', '--', 'plugin.json'], targetDir);
+            hasManifest = out.trim() === 'plugin.json';
+        } catch { /* treat as missing */ }
+
+        if (!hasManifest) {
+            fs.rmSync(targetDir, { recursive: true });
+            return { success: false, message: `"${name}" has no plugin.json at its root — not a valid plugin. Install aborted.` };
         }
+
+        // Manifest confirmed present — now check out the working tree
+        // (this is where blob content actually gets fetched).
+        await execFileAsync('git', ['checkout', 'HEAD', '--', '.'], targetDir);
 
         return { success: true, message: `Installed "${name}" successfully. Restart to activate.` };
     } catch (e: any) {
