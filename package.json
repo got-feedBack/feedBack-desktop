@@ -15,7 +15,7 @@
     "build:audio": "bash scripts/build-audio.sh Release",
     "build:audio:debug": "bash scripts/build-audio.sh Debug",
     "rebuild:audio": "rm -rf build && bash scripts/build-audio.sh Release",
-    "build:native": "npm run build:audio",
+"build:native": "npm run build:audio",
     "bundle:slopsmith": "bash scripts/bundle-slopsmith.sh",
     "bundle:python": "bash scripts/bundle-python.sh",
     "bundle:binaries": "bash scripts/bundle-binaries.sh",
