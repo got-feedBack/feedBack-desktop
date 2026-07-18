@@ -835,6 +835,20 @@ function createWindow(port: number): void {
     }
 }
 
+// Steam Deck (and Big Picture / "gamepad UI") ships with NO registered default
+// web browser, so `shell.openExternal(httpUrl)` → xdg-open falls back to the KDE
+// Discover store (a Firefox-install prompt) instead of opening the page. That
+// broke "Connect with tone3000" and every other external link on the Deck. When
+// we detect that we're running under Steam's gamepad UI, route web links through
+// Steam's own overlay browser via the `steam://openurl/` handler, which works in
+// that mode (and can still reach the OAuth callback on 127.0.0.1). Gate on the
+// Steam env signals so ordinary desktop Linux (where a real browser exists) is
+// untouched. Set by the Steam client: `SteamDeck=1` (Deck hardware),
+// `SteamGamepadUI=1` (gamepad/Big-Picture UI where there is no browser).
+const RUNNING_UNDER_STEAM_GAMEPAD_UI =
+    process.platform === 'linux' &&
+    (process.env.SteamGamepadUI === '1' || process.env.SteamDeck === '1');
+
 // Forward a URL to the OS default browser only if it's a web URL.
 // `shell.openExternal` will gladly hand any string to the user's
 // registered protocol handlers (file:, javascript:, mailto:, custom
@@ -856,6 +870,15 @@ function openWebUrlExternally(url: string): void {
     // strings can carry whitespace / control characters that the URL
     // parser strips, and openExternal should see exactly the bytes we
     // validated.
+    if (RUNNING_UNDER_STEAM_GAMEPAD_UI) {
+        // Open in Steam's overlay browser. If Steam isn't handling steam://
+        // (e.g. launched outside Steam), fall back to the normal OS opener so
+        // we never silently drop the link.
+        shell.openExternal(`steam://openurl/${parsed.href}`).catch(() => {
+            shell.openExternal(parsed.href).catch(() => { /* user dismissed / system error */ });
+        });
+        return;
+    }
     shell.openExternal(parsed.href).catch(() => { /* user dismissed / system error */ });
 }
 
