@@ -1266,6 +1266,37 @@ void dispatchRequest(HostState& st, int requestId, const juce::String& op,
         params[idx]->setValue((float)juce::jlimit(0.0, 1.0, vald));
         reply(true, {});
     }
+    else if (op == op::kListParameters)
+    {
+        if (!st.plugin)
+        {
+            reply(false, {}, "no plugin loaded");
+            return;
+        }
+        // Snapshot the plugin's CURRENT parameter values so the host can mirror
+        // edits the user made in the plugin's OWN editor window back into the
+        // in-app UI (a sandboxed plugin exposes no host-side JUCE parameter
+        // proxies, so this pipe round-trip is the only way the host reads them).
+        // Read-only; mirrors the in-process SignalChain::getParameters fields.
+        // getValue() is normalized 0..1 — same range setParameter takes.
+        auto params = st.plugin->getParameters();
+        juce::Array<juce::var> out;
+        out.ensureStorageAllocated(params.size());
+        for (int i = 0; i < params.size(); ++i)
+        {
+            auto* p = params[i];
+            juce::DynamicObject::Ptr po(new juce::DynamicObject());
+            po->setProperty("index", i);
+            po->setProperty("name",  p->getName(128));
+            po->setProperty("value", (double) p->getValue());
+            po->setProperty("label", p->getLabel());
+            po->setProperty("text",  p->getCurrentValueAsText());
+            out.add(juce::var(po.get()));
+        }
+        juce::DynamicObject::Ptr res(new juce::DynamicObject());
+        res->setProperty("params", juce::var(out));
+        reply(true, juce::var(res.get()));
+    }
     else if (op == op::kShutdown)
     {
         reply(true, {});

@@ -422,6 +422,21 @@ void SandboxedProcessor::setSandboxedParameter(int index, float value)
     control->postNoReply(op::kSetParameter, juce::var(args.get()));
 }
 
+juce::var SandboxedProcessor::listSandboxedParameters()
+{
+    if (!control || !isAlive()) return {};
+    juce::String err;
+    auto reply = control->request(op::kListParameters, {},
+                                  kDefaultReplyTimeoutMs, &err);
+    if (err.isNotEmpty())
+    {
+        VST_TRACE("[sandbox] listSandboxedParameters request failed: %s",
+                  err.toRawUTF8());
+        return {};
+    }
+    return reply.getProperty("params", juce::var());
+}
+
 bool SandboxedProcessor::isAlive() const noexcept
 {
     return alive.load(std::memory_order_acquire);
