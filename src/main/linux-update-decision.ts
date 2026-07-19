@@ -9,6 +9,19 @@
 export type LinuxUpdateDecision = 'idle' | 'staged' | 'download';
 
 /**
+ * Whether a GitHub release's `target_commitish` is a real commit SHA rather
+ * than a branch name. GitHub sets it to whatever the release was published
+ * against: a full 40-char hex SHA only if the nightly pipeline pinned one,
+ * otherwise a branch name like "main". `linuxUpdateDecision()` compares it
+ * SHA-vs-SHA, so a branch name would never match the baked SHA and would send
+ * every check to 'download' — re-fetching the ~1.5GB AppImage forever and
+ * never reaching 'idle'. checkNowLinux() gates on this and fails safe instead.
+ */
+export function isCommitSha(value: string | null | undefined): boolean {
+    return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value);
+}
+
+/**
  * @param bakedSha    commit the running build was cut from (build-info.json),
  *                    or null for a dev/unknown build.
  * @param remoteSha   target_commitish of the latest nightly GitHub release.

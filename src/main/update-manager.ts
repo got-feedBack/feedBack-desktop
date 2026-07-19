@@ -78,7 +78,7 @@ import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import type { UpdateInfo } from 'velopack';
 import { IPC_UPDATE_EVENT_AVAILABLE, IPC_UPDATE_EVENT_DOWNLOADED, IPC_UPDATE_EVENT_PROGRESS, IPC_UPDATE_EVENT_DIAG } from './ipc-channels';
-import { linuxUpdateDecision } from './linux-update-decision';
+import { linuxUpdateDecision, isCommitSha } from './linux-update-decision';
 
 // Abort the small metadata request if GitHub stalls, so a dead connection
 // surfaces as an error instead of a frozen "checking" state forever. The
@@ -375,6 +375,18 @@ async function checkNowLinux(): Promise<UpdateStatus> {
                 throw new Error('No .AppImage asset found in the nightly release');
             }
             const remoteSha = release.target_commitish;
+            // Fail safe if the release isn't pinned to a commit SHA (e.g. the
+            // pipeline published it against a branch like "main"). The decision
+            // below is SHA-vs-SHA, so a branch name would never match the baked
+            // SHA and would re-download the ~1.5GB AppImage on every check
+            // forever. Surface it as an error (captured in Export Diagnostics)
+            // rather than entering that loop.
+            if (!isCommitSha(remoteSha)) {
+                diagLog('checkNow: release target_commitish is not a commit SHA — cannot determine staleness', { remoteSha });
+                lastError = 'Update unavailable: the nightly release is not pinned to a commit';
+                activeState = 'error';
+                return getStatus();
+            }
             const shortSha = remoteSha.slice(0, 7);
             const bakedSha = readBakedSha();
             const decision = linuxUpdateDecision(bakedSha, remoteSha, linuxDownloadedSha);
