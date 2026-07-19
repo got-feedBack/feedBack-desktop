@@ -150,6 +150,10 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-splitscreen
 		got-feedback/feedback-plugin-staffview
 		got-feedback/feedback-plugin-stem-mixer
+		# Stem Splitter — repo uses the feedBack-plugin-* casing (capital B),
+		# so the lowercase prefix strip doesn't apply; explicit dirname
+		# matching the plugin id, same as rig_builder below.
+		got-feedback/feedBack-plugin-stem-splitter:stem_splitter
 		got-feedback/feedback-plugin-stems
 		got-feedback/feedback-plugin-stepmode
 		got-feedback/feedback-plugin-strum-fighter
