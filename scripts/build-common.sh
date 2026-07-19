@@ -107,10 +107,15 @@ clone_slopsmith() {
 	# builds and the push/tag CI paths behave exactly as before.
 	# --branch accepts either a branch or a tag, both shallow-cloneable.
 	local slopsmith_ref="${SLOPSMITH_REF:-main}"
+	# SLOPSMITH_REPO overrides the core repo (default got-feedback/feedback),
+	# mirroring SLOPSMITH_REF. Lets a contributor without push access to the
+	# core repo bundle a branch pushed to their own fork for a test build:
+	#   SLOPSMITH_REPO=me/feedBack SLOPSMITH_REF=my-branch
+	local slopsmith_repo="${SLOPSMITH_REPO:-got-feedback/feedback}"
 	local _auth=""
 	[[ -n "${GH_CLONE_TOKEN:-}" ]] && _auth="x-access-token:${GH_CLONE_TOKEN}@"
-	echo "Cloning Slopsmith repository (ref: ${slopsmith_ref})..."
-	git clone --depth 1 --branch "$slopsmith_ref" "https://${_auth}github.com/got-feedback/feedback.git" "$clone_dir"
+	echo "Cloning Slopsmith repository (${slopsmith_repo} ref: ${slopsmith_ref})..."
+	git clone --depth 1 --branch "$slopsmith_ref" "https://${_auth}github.com/${slopsmith_repo}.git" "$clone_dir"
 
 	# Remove broken symlinks from plugins dir
 	find "$clone_dir/plugins" -maxdepth 1 -type l -delete 2>/dev/null || true
@@ -478,6 +483,24 @@ bundle_soundfont() {
 build_typescript() {
     echo_step "Building TypeScript"
     npm run build:ts
+    # Bake the source commit SHA into the packaged app so the Linux AppImage
+    # updater can tell whether the running build is behind the latest nightly
+    # (whose GitHub release target_commitish is this same commit). In CI
+    # GITHUB_SHA matches the nightly release target exactly; local builds fall
+    # back to the working-tree HEAD — which won't match any nightly, so the
+    # updater simply offers the latest official build. Packaged via the
+    # electron-builder `files: ["dist/**/*"]` glob and read at runtime by
+    # update-manager.ts (path.join(__dirname, 'build-info.json')).
+    local build_sha="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+    # Also capture the bundled core (feedBack) repo's commit, cloned earlier
+    # in main() into $SLOPSMITH_DIR (exported by clone_slopsmith). A fix can
+    # live in either repo, so knowing only the desktop SHA isn't enough to
+    # answer "is this build stale" — this is read back by update-manager.ts's
+    # readBuildInfo() and surfaced in the renderer's diagnostic snapshot.
+    local core_sha="$(git -C "${SLOPSMITH_DIR:-}" rev-parse HEAD 2>/dev/null || echo unknown)"
+    node -e "require('fs').writeFileSync('dist/main/build-info.json', JSON.stringify({ sha: process.argv[1], coreSha: process.argv[2] }))" "$build_sha" "$core_sha"
+    echo "  Build SHA: $build_sha"
+    echo "  Core SHA:  $core_sha"
     echo_summary "TypeScript built"
     echo ""
 }
