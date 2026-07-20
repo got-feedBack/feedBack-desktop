@@ -1,0 +1,57 @@
+# Plugins bundled in desktop releases.
+#
+# This is the single source of truth used by both build-common.sh and
+# update-bundled-plugins.sh. Format:
+#   owner/repo[@branch][:directory]
+#
+# directory defaults to the repository name with a leading
+# "feedback-plugin-" removed and hyphens changed to underscores.
+
+# Bundled plugins — all under the got-feedback org after the migration.
+got-feedback/feedback-plugin-bongocat
+got-feedback/feedback-plugin-drums
+got-feedback/feedback-plugin-editor
+got-feedback/feedback-plugin-flappy-bend
+got-feedback/feedback-plugin-fretboard
+got-feedback/feedback-plugin-guitar-theory
+got-feedback/feedback-plugin-invert-highway
+got-feedback/feedback-plugin-jumpingtab
+got-feedback/feedback-plugin-loosefolder:loose_folder
+got-feedback/feedback-plugin-lyrics-karaoke
+got-feedback/feedback-plugin-metronome
+got-feedback/feedback-plugin-midi
+got-feedback/feedback-plugin-multiplayer
+got-feedback/feedback-plugin-musicxml-import
+got-feedback/feedback-plugin-nam-tone
+got-feedback/feedback-plugin-notedetect
+got-feedback/feedback-plugin-piano
+got-feedback/feedback-plugin-practice
+got-feedback/feedback-plugin-sectionmap
+got-feedback/feedback-plugin-song-preview
+got-feedback/feedback-plugin-splitscreen
+got-feedback/feedback-plugin-staffview
+got-feedback/feedback-plugin-stem-mixer
+# Stem Splitter — repo uses the feedBack-plugin-* casing (capital B),
+# so the lowercase prefix strip doesn't apply; explicit dirname
+# matching the plugin id, same as rig_builder below.
+got-feedback/feedBack-plugin-stem-splitter:stem_splitter
+got-feedback/feedback-plugin-stems
+got-feedback/feedback-plugin-stepmode
+got-feedback/feedback-plugin-strum-fighter
+got-feedback/feedback-plugin-studio
+got-feedback/feedback-plugin-tabview
+got-feedback/feedback-plugin-themes
+got-feedback/feedback-plugin-transpose-chords
+got-feedback/feedback-plugin-tutorials
+got-feedback/feedback-plugin-virtuoso
+# Rig Builder (NAM tone builder) — the repo was renamed
+# feedBack-plugin-rig-builder (capital B, so the lowercase prefix
+# strip doesn't apply; explicit dirname instead). The old
+# `got-feedback/rig_builder` name only worked via a GitHub rename
+# redirect, which silently breaks if a new repo ever takes that name.
+got-feedback/feedBack-plugin-rig-builder:rig_builder
+# Camera Director (3D-highway free camera) — our fork of nimuart's plugin
+# (v3 popover launcher + drum/piano support; PR upstream at
+# nimuart/cameradirector_feedback#3). Repo isn't under the
+# feedback-plugin-* prefix, so give an explicit dirname matching the id.
+got-feedback/cameradirector_feedback:camera_director

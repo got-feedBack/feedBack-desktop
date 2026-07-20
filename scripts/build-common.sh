@@ -24,6 +24,7 @@ fi
 # is_skipped_lib() — glibc/loader skip list, shared verbatim with
 # bundle-binaries.sh so the bundler and the audit never disagree.
 source "$SCRIPT_DIR/bundled-lib-skiplist.sh"
+source "$SCRIPT_DIR/plugin-manifest.sh"
 
 # Colors
 if [[ -z "${RED:-}" ]]; then
@@ -130,87 +131,19 @@ clone_slopsmith() {
 	# @<branch> clones a non-default branch (used to ship in-review
 	# plugin work in a feature-branch test build).
 	cd "$clone_dir/plugins"
-	local plugins=(
-		# Bundled plugins — all under the got-feedback org after the migration.
-		got-feedback/feedback-plugin-bongocat
-		got-feedback/feedback-plugin-drums
-		got-feedback/feedback-plugin-editor
-		got-feedback/feedback-plugin-flappy-bend
-		got-feedback/feedback-plugin-fretboard
-		got-feedback/feedback-plugin-guitar-theory
-		got-feedback/feedback-plugin-invert-highway
-		got-feedback/feedback-plugin-jumpingtab
-		got-feedback/feedback-plugin-loosefolder:loose_folder
-		got-feedback/feedback-plugin-lyrics-karaoke
-		got-feedback/feedback-plugin-metronome
-		got-feedback/feedback-plugin-midi
-		got-feedback/feedback-plugin-multiplayer
-		got-feedback/feedback-plugin-musicxml-import
-		got-feedback/feedback-plugin-nam-tone
-		got-feedback/feedback-plugin-notedetect
-		got-feedback/feedback-plugin-piano
-		got-feedback/feedback-plugin-practice
-		got-feedback/feedback-plugin-sectionmap
-		got-feedback/feedback-plugin-song-preview
-		got-feedback/feedback-plugin-splitscreen
-		got-feedback/feedback-plugin-staffview
-		got-feedback/feedback-plugin-stem-mixer
-		# Stem Splitter — repo uses the feedBack-plugin-* casing (capital B),
-		# so the lowercase prefix strip doesn't apply; explicit dirname
-		# matching the plugin id, same as rig_builder below.
-		got-feedback/feedBack-plugin-stem-splitter:stem_splitter
-		got-feedback/feedback-plugin-stems
-		got-feedback/feedback-plugin-stepmode
-		got-feedback/feedback-plugin-strum-fighter
-		got-feedback/feedback-plugin-studio
-		got-feedback/feedback-plugin-tabview
-		got-feedback/feedback-plugin-themes
-		got-feedback/feedback-plugin-transpose-chords
-		got-feedback/feedback-plugin-tutorials
-		got-feedback/feedback-plugin-virtuoso
-		# Rig Builder (NAM tone builder) — the repo was renamed
-		# feedBack-plugin-rig-builder (capital B, so the lowercase prefix
-		# strip doesn't apply; explicit dirname instead). The old
-		# `got-feedback/rig_builder` name only worked via a GitHub rename
-		# redirect, which silently breaks if a new repo ever takes that name.
-		got-feedback/feedBack-plugin-rig-builder:rig_builder
-		# Camera Director (3D-highway free camera) — our fork of nimuart's plugin
-		# (v3 popover launcher + drum/piano support; PR upstream at
-		# nimuart/cameradirector_feedback#3). Repo isn't under the
-		# feedback-plugin-* prefix, so give an explicit dirname matching the id.
-		got-feedback/cameradirector_feedback:camera_director
-	)
-
 	local total=0
 	local cloned=0
-	for entry in "${plugins[@]}"; do
+	while IFS= read -r entry; do
 		total=$((total + 1))
-		# Split off an optional ":<dirname>" then an optional "@<branch>".
-		# Git branch names can't contain ':' so the dirname split is safe
-		# to do first; what's left is "<owner>/<repo>" or "<owner>/<repo>@<branch>".
-		local spec="$entry" dirname="" branch=""
-		if [[ "$spec" == *:* ]]; then
-			dirname="${spec##*:}"
-			spec="${spec%%:*}"
-		fi
-		local owner_repo="$spec"
-		if [[ "$spec" == *@* ]]; then
-			branch="${spec##*@}"
-			owner_repo="${spec%%@*}"
-		fi
-		if [[ -z "$dirname" ]]; then
-			dirname="${owner_repo##*/}"
-			dirname="${dirname#feedback-plugin-}"
-			dirname="${dirname//-/_}"
-		fi
+		parse_plugin_entry "$entry"
 		local clone_args=(--depth 1)
-		[[ -n "$branch" ]] && clone_args+=(--branch "$branch")
-		if git clone "${clone_args[@]}" "https://${_auth}github.com/${owner_repo}.git" "$dirname" 2>/dev/null; then
+		[[ -n "$PLUGIN_BRANCH" ]] && clone_args+=(--branch "$PLUGIN_BRANCH")
+		if git clone "${clone_args[@]}" "https://${_auth}github.com/${PLUGIN_OWNER_REPO}.git" "$PLUGIN_DIRNAME" 2>/dev/null; then
 			cloned=$((cloned + 1))
 		else
-			echo " skipped ${owner_repo}${branch:+@$branch}"
+			echo " skipped ${PLUGIN_OWNER_REPO}${PLUGIN_BRANCH:+@$PLUGIN_BRANCH}"
 		fi
-	done
+	done < <(plugin_manifest_entries "$SCRIPT_DIR/bundled-plugins.txt")
 
 	# Strip dangling symlinks from the bundled tree. Some plugins ship
 	# build-time symlinks into sources that aren't present at runtime (e.g.

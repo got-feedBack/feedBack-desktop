@@ -8,6 +8,19 @@ Unified build system for Slopsmith Desktop supporting Linux (via Docker), macOS,
 ./scripts/build-release.sh
 ```
 
+To refresh the plugins in an installed development copy from GitHub:
+
+```bash
+./scripts/update-bundled-plugins.sh
+```
+
+Use `--dry-run` to preview planned replacements. The updater and release builds both
+read `scripts/bundled-plugins.txt`, so newly bundled plugins are picked up
+automatically. Set `GH_CLONE_TOKEN` when the repositories require authentication.
+On Windows, run it from Git Bash; it automatically uses
+`%APPDATA%/feedback-desktop/plugins` and does not require `rsync`. Close the
+desktop app before applying updates so Windows does not lock plugin files.
+
 ## Call Hierarchy
 
 ```
@@ -183,4 +196,3 @@ This signs the bundled binaries but does **not** notarize — notarization requi
 ### Local cmake-js cache
 
 `build-windows.sh` only force-clears `$HOME/.cmake-js` when `$CI` is set (or `CLEAN_CMAKE_JS=1` is exported). Local Windows builds reuse the cache by default; set `CLEAN_CMAKE_JS=1` if you need a fully fresh build to mirror CI behaviour.
-
