@@ -637,4 +637,32 @@ if (isMainFrame) {
     contextBridge.exposeInMainWorld('slopsmithDesktop', feedBackDesktopApi);
 }
 
+// Keyboard-focus recovery watchdog (Windows). When the sandbox vst-host's
+// native editor window closes while focused, the OS keyboard focus can be
+// left orphaned: this window still looks active but document.hasFocus() is
+// false and NO text box in the app receives keys until a foreground cycle
+// (the "hit the Windows key and typing works again" reports, always starting
+// in Rig Builder — the one place native editor windows open). Pointer events
+// still arrive without keyboard focus, so the user's first click inside the
+// dead window is the recovery signal: a pointerdown while document.hasFocus()
+// is false means the OS won't type into the window being interacted with —
+// ask main to run the blur()/focus() cycle. Capture phase so no
+// stopPropagation hides the click; throttled in case focus is contended.
+if (isMainFrame && process.platform === 'win32') {
+    // preload.ts compiles without the DOM lib (see isMainFrame): reach the
+    // frame's window/document through globalThis with minimal local shapes.
+    const g = globalThis as unknown as {
+        addEventListener?: (type: string, cb: () => void, capture?: boolean) => void;
+        document?: { hasFocus?: () => boolean };
+    };
+    let lastFocusRecovery = 0;
+    g.addEventListener?.('pointerdown', () => {
+        if (g.document?.hasFocus?.()) return;
+        const now = Date.now();
+        if (now - lastFocusRecovery < 1000) return;
+        lastFocusRecovery = now;
+        ipcRenderer.send('window:recoverFocus');
+    }, true);
+}
+
 export {};

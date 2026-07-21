@@ -568,6 +568,24 @@ function createWindow(port: number): void {
         return mainWindow.webContents.isAudioMuted();
     });
 
+    // Keyboard-focus recovery (Windows). A native VST editor window — owned by
+    // the out-of-process vst-host sandbox since the WndProc crash fix — can
+    // close while it holds keyboard focus (user clicks its X, or a chain
+    // rebuild tears it down). Windows then leaves this window LOOKING active
+    // while the OS keyboard focus points at nothing: every text box in the app
+    // goes dead until an OS-level foreground cycle (users found the Windows
+    // key un-sticks it). The renderer detects the state — a click landing
+    // while document.hasFocus() is false (see preload.ts watchdog) — and asks
+    // us to run that same cycle programmatically. blur() first: in the stale
+    // state Electron may still believe the window is focused, so a bare
+    // focus() can no-op.
+    ipcMain.on('window:recoverFocus', (event) => {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
+        win.blur();
+        win.focus();
+    });
+
     const serverUrl = `http://127.0.0.1:${port}`;
 
     // Clear the Chromium HTTP cache before the first load. The server
