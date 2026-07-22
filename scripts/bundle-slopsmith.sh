@@ -168,6 +168,13 @@ for venue in club arena; do
     rm -rf "$BUNDLE_DIR/plugins/career/venue-packs/$venue"
 done
 
+# Opt-in content: don't bundle rig_builder's fat VST3 bundles (~650 MB). They
+# download on demand, sliced to the current platform, into a writable config-dir
+# root the plugin's loader also searches (rig_builder/routes.py
+# _download_vst_pack, data/vst_packs.json). The plugin runs fine without them —
+# a first-run prompt offers the download.
+rm -rf "$BUNDLE_DIR"/plugins/*rig-builder/vst "$BUNDLE_DIR"/plugins/*rig_builder/vst
+
 # Desktop-specific plugins (audio_engine, plugin_manager) declared in
 # src/renderer/**/plugin.json
 for dp in "$PROJECT_DIR/src/renderer" "$PROJECT_DIR/src/renderer/plugin-manager"; do
