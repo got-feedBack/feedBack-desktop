@@ -160,6 +160,14 @@ done
 # Plugin-discovery __init__.py
 cp "$SLOPSMITH_DIR/plugins/__init__.py" "$BUNDLE_DIR/plugins/"
 
+# Opt-in content: don't bundle the higher career venues — the starter (bar)
+# stays bundled so career works offline, but club/arena (~678 MB of crowd MP4s)
+# download on demand from the content-packs release (venues.json `pack` URLs;
+# career/routes.py _download_pack). Removing the media degrades gracefully.
+for venue in club arena; do
+    rm -rf "$BUNDLE_DIR/plugins/career/venue-packs/$venue"
+done
+
 # Desktop-specific plugins (audio_engine, plugin_manager) declared in
 # src/renderer/**/plugin.json
 for dp in "$PROJECT_DIR/src/renderer" "$PROJECT_DIR/src/renderer/plugin-manager"; do
