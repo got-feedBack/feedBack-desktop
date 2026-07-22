@@ -72,6 +72,12 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    # Read-only GITHUB_TOKEN: the delta-base step reads the rolling `nightly`
+    # release feed via `vpk download github`. Artifact upload uses its own
+    # runtime token; cross-repo clone uses FEEDBACK_CLONE_TOKEN.
+    permissions:
+      contents: read
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -196,6 +202,58 @@ jobs:
           # (package.json) — Velopack ships the CLI and SDK in lockstep.
           dotnet tool install -g vpk --version 0.0.1589-ga2c5a97
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      # Delta base: pull the CURRENT rolling `nightly` feed (last night's full
+      # nupkg) into the pack dir so vpk diffs against it and emits a small
+      # *-delta.nupkg instead of forcing every tester to re-download ~1.5 GB.
+      # This runs in `build`, which finishes before the `publish` job deletes +
+      # recreates the release — so the prior full is still downloadable here.
+      # First run / empty feed is tolerated (full-only pack).
+      #
+      # Bounding: `vpk pack` never prunes and `--keepMaxReleases` doesn't exist
+      # for pack or `upload github` (s3/az/local only). Left alone, re-downloading
+      # + republishing the feed each night would accumulate full nupkgs forever.
+      # So we keep ONLY the single newest prior full as the base and drop the
+      # rest; after pack the rolling release holds exactly the two most recent
+      # fulls + the latest delta — bounded, consistent, one delta per release
+      # (laggards fall back to full via the client's MaximumDeltasBeforeFallback).
+      - name: Fetch prior release as delta base
+        if: matrix.platform != 'linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.platform }}" in
+            win) channel="win-x64-nightly" ;;
+            mac) channel="osx-arm64-nightly" ;;
+            *)   echo "::error::unexpected platform '${{ matrix.platform }}'"; exit 1 ;;
+          esac
+          mkdir -p release/velopack
+          if ! vpk download github \
+              --repoUrl "https://github.com/${{ github.repository }}" \
+              --channel "$channel" \
+              --token "$GH_TOKEN" \
+              -o release/velopack; then
+            echo "::notice::No prior '$channel' feed (first run / empty) — packing full only."
+          fi
+          # Keep only the newest *-full.nupkg as the delta base; delete every
+          # other downloaded file (older fulls, prior deltas, manifests,
+          # installers). vpk pack regenerates the manifest afterwards.
+          shopt -s nullglob
+          fulls=(release/velopack/*-full.nupkg)
+          base=""
+          if (( ${#fulls[@]} )); then
+            mapfile -t sorted < <(printf '%s\n' "${fulls[@]}" | sort -V)
+            base="${sorted[-1]}"
+          fi
+          if [[ -n "$base" ]]; then
+            echo "Delta base: $base"
+            find release/velopack -type f ! -path "$base" -delete
+          else
+            echo "No prior full found — vpk will pack a full-only release."
+            find release/velopack -type f -delete
+          fi
 
       # Windows: pack the electron-builder unpacked dir into Velopack release
       # assets (per-machine MSI, *-full.nupkg, *-delta.nupkg,
@@ -342,8 +400,11 @@ jobs:
   # prerelease=false). So we delete + recreate the `nightly` release each run
   # (assets are version-stamped, so clobbering by name wouldn't reclaim old
   # ones) with prerelease=false and --latest=false — the "Latest" badge stays
-  # pinned to the most recent stable tag. Full .nupkg only; no deltas (each run
-  # wipes the prior full package, which vpk would need to compute a delta).
+  # pinned to the most recent stable tag. Deltas ARE enabled: the build job's
+  # "Fetch prior release as delta base" step re-downloads last night's full
+  # nupkg before packing (build finishes before this delete+recreate), so vpk
+  # emits a *-delta.nupkg. The rolling release therefore holds the two most
+  # recent fulls + the latest delta — bounded, not accumulating.
   publish:
     needs: [setup, build]
     runs-on: ubuntu-latest
