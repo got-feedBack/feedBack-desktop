@@ -578,6 +578,10 @@ export async function startPython(): Promise<void> {
         XDG_CACHE_HOME: cacheBase,
         TORCH_HOME: process.env.TORCH_HOME || path.join(cacheBase, 'torch'),
         HF_HOME: process.env.HF_HOME || path.join(cacheBase, 'huggingface'),
+        // Never read the end user's per-user site-packages — the bundle ships
+        // its own deps, and a stray user-site package must not shadow (or mask
+        // a gap in) them. Mirrors PYTHONNOUSERSITE=1 used at build time.
+        PYTHONNOUSERSITE: '1',
         RESOURCESPATH: app.isPackaged
             ? process.resourcesPath
             : path.join(__dirname, '..', '..', 'resources'),
@@ -632,6 +636,12 @@ export async function startPython(): Promise<void> {
 
     // Set PYTHONHOME for bundled Python on all platforms
     if (app.isPackaged) {
+        // Packaged builds ship plugins but must NOT block startup doing a
+        // runtime `pip install` of heavy optional plugin deps (torch/whisperx/
+        // demucs) — that hangs the backend past the readiness window on first
+        // launch. The slopsmith plugin loader honours this flag and loads such
+        // plugins degraded (their optional features stay off until deps exist).
+        pythonEnv.SLOPSMITH_SKIP_PLUGIN_INSTALL = '1';
         if (process.platform === 'win32') {
             pythonEnv.PYTHONHOME = path.join(process.resourcesPath, 'python');
         } else {

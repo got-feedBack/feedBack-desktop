@@ -8,6 +8,15 @@
 
 set -euo pipefail
 
+# Isolate the embeddable/standalone Python used for bundling from the BUILD
+# machine's per-user site-packages. Without this, pip on a dev machine that has
+# a system Python installed sees transitive deps as "already satisfied" via the
+# user site (~/.local or %APPDATA%\Python) and SKIPS bundling them (e.g.
+# typing_extensions, urllib3, certifi). The packaged app then crashes with
+# ModuleNotFoundError on clean end-user machines while "working" on the build
+# box. CI runners have no user site, so this is a no-op there.
+export PYTHONNOUSERSITE=1
+
 # Check if this is being sourced by a platform script
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: build-common.sh should not be run directly" >&2
