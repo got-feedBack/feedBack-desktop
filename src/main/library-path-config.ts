@@ -11,6 +11,7 @@ export type LibraryPathPreparationStatus =
 export interface LibraryPathPreparation {
     status: LibraryPathPreparationStatus;
     environmentDlcDir?: string;
+    environmentDlcFallback?: string;
     error?: string;
 }
 
@@ -47,6 +48,11 @@ export function applyLibraryPathToPythonEnvironment(
     } else {
         delete environment.DLC_DIR;
     }
+    if (preparation.environmentDlcFallback) {
+        environment.FEEDBACK_DLC_DIR_FALLBACK = preparation.environmentDlcFallback;
+    } else {
+        delete environment.FEEDBACK_DLC_DIR_FALLBACK;
+    }
 }
 
 /**
@@ -57,11 +63,13 @@ export function applyLibraryPathToPythonEnvironment(
  * the backend can re-read a Settings change on the next manual scan without
  * requiring a process restart.
  *
- * Failure statuses (invalid-config, write-failed) still export the resolved
- * fallback as DLC_DIR: the backend has NO built-in default (_get_dlc_dir
- * returns None), so removing the env var when config.json cannot own the
- * path would strand the user with an empty library and only a console warn.
- * Config-owned dynamic behaviour applies exactly when config.json is usable.
+ * Failure statuses (invalid-config, write-failed) still hand the backend the
+ * resolved fallback: it has NO built-in default (_get_dlc_dir returns None), so
+ * dropping it would strand the user with an empty library. It goes out as
+ * FEEDBACK_DLC_DIR_FALLBACK, not DLC_DIR — the backend only uses it while
+ * config.json has no usable dlc_dir, so a library saved in Settings after a
+ * launch with a missing folder still takes effect on the next scan instead of
+ * being pinned to the fallback until restart (feedBack#1063).
  */
 export function prepareLibraryPathForPython(
     configDir: string,
@@ -85,7 +93,7 @@ export function prepareLibraryPathForPython(
             if (!isPlainObject(parsed)) {
                 return {
                     status: 'invalid-config',
-                    environmentDlcDir: resolvedDlcDir,
+                    environmentDlcFallback: resolvedDlcDir,
                     error: 'config.json is not a JSON object',
                 };
             }
@@ -93,7 +101,7 @@ export function prepareLibraryPathForPython(
         } catch (err) {
             return {
                 status: 'invalid-config',
-                environmentDlcDir: resolvedDlcDir,
+                environmentDlcFallback: resolvedDlcDir,
                 error: err instanceof Error ? err.message : String(err),
             };
         }
@@ -105,14 +113,14 @@ export function prepareLibraryPathForPython(
             }
             return {
                 status: 'invalid-config',
-                environmentDlcDir: resolvedDlcDir,
+                environmentDlcFallback: resolvedDlcDir,
                 error: 'config.json dlc_dir is not an existing directory',
             };
         }
         if (configured !== undefined && configured !== null && configured !== '') {
             return {
                 status: 'invalid-config',
-                environmentDlcDir: resolvedDlcDir,
+                environmentDlcFallback: resolvedDlcDir,
                 error: 'config.json dlc_dir is not a string',
             };
         }
@@ -130,7 +138,7 @@ export function prepareLibraryPathForPython(
         } catch { /* best-effort temporary-file cleanup */ }
         return {
             status: 'write-failed',
-            environmentDlcDir: resolvedDlcDir,
+            environmentDlcFallback: resolvedDlcDir,
             error: err instanceof Error ? err.message : String(err),
         };
     }
