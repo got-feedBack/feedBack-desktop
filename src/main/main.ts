@@ -497,6 +497,7 @@ function createWindow(port: number): void {
         minWidth: MIN_WIDTH,
         minHeight: MIN_HEIGHT,
         fullscreen: startFullscreen,
+        fullscreenable: true,
         title: 'fee[dB]ack',
         backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
         webPreferences: rendererWebPreferences,
@@ -520,6 +521,17 @@ function createWindow(port: number): void {
         } catch (err) {
             console.warn('[main] Failed to persist window bounds on close:', err);
         }
+    });
+
+    // Respect macOS native fullscreen behavior. If the user enters fullscreen
+    // via the native macOS controls (green "full screen" button), we want to
+    // sync the config to respect the fullscreen state toggled this way as well.
+    mainWindow.on('enter-full-screen', () => {
+        setDesktopConfig({ startFullscreen: true });
+    });
+
+    mainWindow.on('leave-full-screen', () => {
+        setDesktopConfig({ startFullscreen: false });
     });
 
     // Forward renderer console to main process stdout
@@ -1346,12 +1358,6 @@ async function startup(): Promise<void> {
         const value = on === true;
         setDesktopConfig({ startFullscreen: value });
         // Live-apply so the toggle is responsive, not silent-until-relaunch.
-        // Works on the first toggle on Windows/Linux. On macOS the FIRST enter on
-        // a window created windowed is dropped by AppKit (its native-fullscreen
-        // state machine isn't engaged until the window has been fullscreen once —
-        // creating with `fullscreen: true` engages it), so there it takes effect
-        // on next launch instead; the core Settings note tells macOS users that.
-        // Reliable live both ways once the window has entered fullscreen once.
         if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen() !== value) {
             mainWindow.setFullScreen(value);
         }
