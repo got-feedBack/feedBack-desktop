@@ -1,11 +1,11 @@
 # DevContainer build environment
 
-Everything needed to build Slopsmith Desktop in a reproducible,
+Everything needed to build feedBack Desktop in a reproducible,
 CI-identical environment using Docker.
 
 ## Why
 
-Slopsmith Desktop compiles a native C++ audio engine (JUCE), bundles a
+feedBack Desktop compiles a native C++ audio engine (JUCE), bundles a
 portable Python runtime, and packages via electron-builder — all of
 which can produce subtly different artifacts on different distros
 (glibc, system library versions, Node/Python provenance). This
@@ -21,7 +21,7 @@ runner uses so local AppImage builds match CI.
 | `README.md` | This file |
 
 The Docker-wrapped one-shot build lives at
-[`../scripts/build-linux-release.sh`](../scripts/build-linux-release.sh).
+[`../scripts/build-linux-docker.sh`](../scripts/build-linux-docker.sh).
 
 Versions of Node, Python, .NET, Electron, CMake, and the Ubuntu base
 are defined in [`../.build-config.json`](../.build-config.json). CI and
@@ -30,8 +30,9 @@ this container both read from it, so no version drift.
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running
-- The [Slopsmith](https://github.com/got-feedback/feedback) server
-  repository cloned **adjacent** to this one:
+- The [feedBack](https://github.com/got-feedBack/feedBack) core
+  repository cloned **adjacent** to this one, in a folder named
+  `slopsmith/` (the path `devcontainer.json` mounts):
   ```
   your-projects/
   ├── slopsmith/
@@ -53,7 +54,7 @@ With the [Dev Containers extension](https://marketplace.visualstudio.com/items?i
 ### Docker only
 
 ```bash
-./scripts/build-linux-release.sh
+./scripts/build-linux-docker.sh
 ```
 
 Builds the image, runs the build inside a container, and emits
@@ -86,13 +87,13 @@ Two bind mounts:
 
 1. `slopsmith-desktop` → `/workspace` — source code, node_modules, build
    output. Edits are reflected immediately on the host.
-2. `../slopsmith` → `/workspaces/slopsmith` — the Slopsmith server repo
+2. `../slopsmith` → `/workspaces/slopsmith` — the feedBack core repo
    that `bundle-slopsmith.sh` copies from at bundle time.
 
 ### Container lifecycle
 
 The one-shot build container is **not** auto-removed (`--rm` is
-deliberately omitted from `build-linux-release.sh`). This lets you
+deliberately omitted from `build-linux-docker.sh`). This lets you
 attach a shell after a failed build to diagnose:
 
 ```bash
@@ -111,12 +112,10 @@ The script prints the container name on completion or failure.
 
 ### "Slopsmith repository not found"
 
-Clone the server repo adjacent:
+Clone the core repo adjacent, into a folder named `slopsmith`:
 
 ```bash
-cd ..
-git clone https://github.com/got-feedback/feedback.git
-cd slopsmith-desktop
+git clone https://github.com/got-feedBack/feedBack.git ../slopsmith
 ```
 
 ### Permission errors on `release/`
@@ -158,7 +157,7 @@ files the CI workflow reads.
   for the other platforms)
 - **Tool versions**: edit `.build-config.json`
 - **Image-level changes**: edit `Dockerfile`; rebuild with
-  `./scripts/build-linux-release.sh` (or VS Code: **Dev Containers:
+  `./scripts/build-linux-docker.sh` (or VS Code: **Dev Containers:
   Rebuild Container**)
 
 ## See also

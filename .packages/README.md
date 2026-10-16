@@ -1,6 +1,6 @@
 # Package lists
 
-System packages and Python dependencies required to build Slopsmith Desktop.
+System packages and Python dependencies required to build feedBack Desktop.
 
 ## Files
 

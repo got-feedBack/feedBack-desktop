@@ -1,6 +1,6 @@
 # Windows Build Requirements
 
-This document describes the dependencies and setup required to build Slopsmith Desktop on Windows.
+This document describes the dependencies and setup required to build feedBack Desktop on Windows.
 
 ## Required Software
 

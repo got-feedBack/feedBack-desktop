@@ -45,7 +45,7 @@ into the user's config dir).
 
 Linux distribution builds MUST be reproducible against the
 `ubuntu-22.04` GitHub Actions image. The DevContainer
-(`.devcontainer/`) and `scripts/build-linux-release.sh` are the
+(`.devcontainer/`) and `scripts/build-linux-docker.sh` are the
 canonical build path; ad-hoc `npm run dist:linux` on a developer's
 host is for development iteration only.
 

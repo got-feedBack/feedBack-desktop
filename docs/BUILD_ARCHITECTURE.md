@@ -1,6 +1,6 @@
 # Build system architecture
 
-How Slopsmith Desktop is built — the flow of scripts, config, and
+How feedBack Desktop is built — the flow of scripts, config, and
 packaging across local dev and CI.
 
 ## Philosophy
@@ -103,7 +103,7 @@ scripts/
 ├── bundle-python.sh          — portable Python runtime (Linux)
 ├── bundle-binaries.sh        — ffmpeg + vgmstream + fluidsynth + libs (Linux)
 ├── bundle-soundfont.sh       — GeneralUser-GS.sf2 download + verify (cross-platform)
-├── build-linux-release.sh    — Docker wrapper for reproducible Linux AppImage
+├── build-linux-docker.sh     — Docker wrapper for reproducible Linux AppImage
 ├── parse-build-config.py     — JSON value extractor
 └── setup-dev.sh              — local prerequisite checker
 ```
@@ -154,7 +154,7 @@ rebuilds the native addon against the currently-installed Electron.
 | Entry | `npm run dist:linux` (via checkout + setup-* + install) | `npm run dist:linux` (inside container) |
 | Node / Python | From `.build-config.json` | From `.build-config.json` |
 | System deps | `.packages/apt.txt` | `.packages/apt.txt` |
-| Slopsmith source | Cloned fresh to `$RUNNER_TEMP` | Bind-mounted from `../slopsmith` |
+| feedBack core source | Cloned fresh to `$RUNNER_TEMP` | Bind-mounted from `../slopsmith` |
 | Python bundle | `scripts/bundle-python.sh` | `scripts/bundle-python.sh` |
 | Binary bundle | Inline bash (ffmpeg / vgmstream / fluidsynth lib chain) | `scripts/bundle-binaries.sh` (invoked by `npm run bundle`) |
 | Soundfont bundle | `scripts/bundle-soundfont.sh` | `scripts/bundle-soundfont.sh` |

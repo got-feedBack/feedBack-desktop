@@ -1,6 +1,6 @@
 # Build Scripts
 
-Unified build system for Slopsmith Desktop supporting Linux (via Docker), macOS, and Windows.
+Unified build system for feedBack Desktop supporting Linux (via Docker), macOS, and Windows.
 
 ## Quick Start
 
