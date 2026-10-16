@@ -54,6 +54,7 @@
     "pushRendererAudio",
     "removeProcessor",
     "removeSource",
+    "rendererBusPortMessage",
     "replaceIR",
     "resetPeaks",
     "saveDeviceSettings",

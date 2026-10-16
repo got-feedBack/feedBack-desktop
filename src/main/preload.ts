@@ -51,6 +51,10 @@ export interface UpdateDownloadedPayload { version: string; channel: UpdateChann
 export interface UpdateProgressPayload { percent: number; channel: UpdateChannel }
 export interface UpdateDiagPayload { ts: number; message: string; data: Record<string, unknown> | null }
 
+// window.postMessage type the renderer uses to hand the preload its
+// renderer-bus MessagePort (see audio.rendererBusPortMessage).
+const RENDERER_BUS_PORT_MESSAGE = 'feedback-desktop:renderer-bus-port';
+
 // Audio setDevice payload — duplex when input/output types match and device
 // names match (or both empty); split otherwise. NodeAddon validates the
 // shape and coerces sampleRate/bufferSize via Number() before forwarding.
@@ -392,6 +396,14 @@ const feedBackDesktopApi = {
         // worklet's drain loop; check getRendererBusMetrics() for health.
         pushRendererAudio: (interleavedLR: Float32Array, sourceRate: number): void =>
             ipcRenderer.send('audio:pushRendererAudio', interleavedLR, sourceRate),
+        // Direct capture path: the renderer hands the bus tap worklet one end
+        // of a MessageChannel and posts the other end to the page with
+        // window.postMessage({ type: rendererBusPortMessage, sourceRate }, '*', [port]).
+        // The listener below forwards it to the main process, so the worklet's
+        // batches reach the engine without passing through the renderer main
+        // thread (a stall there no longer underflows the bus). Presence of this
+        // key is the feature flag; pushRendererAudio stays for older cores.
+        rendererBusPortMessage: RENDERER_BUS_PORT_MESSAGE,
         getRendererBusMetrics: (): Promise<{
             enabled: boolean; fillFrames: number; capacityFrames: number;
             pushedFrames: number; consumedFrames: number;
@@ -628,6 +640,23 @@ const feedBackDesktopApi = {
 };
 
 if (isMainFrame) {
+    // contextBridge cannot carry a MessagePort, so the renderer-bus port takes
+    // Electron's documented context-isolation route: main-world
+    // window.postMessage → this isolated-world listener → ipcRenderer.postMessage.
+    // No DOM lib here (see the focus watchdog below): minimal local shapes.
+    const g = globalThis as unknown as {
+        addEventListener?: (type: string, cb: (event: {
+            source: unknown; data: unknown; ports: readonly unknown[];
+        }) => void) => void;
+    };
+    g.addEventListener?.('message', (event) => {
+        if (event.source !== globalThis) return;
+        const data = event.data as { type?: unknown; sourceRate?: unknown } | null;
+        if (!data || data.type !== RENDERER_BUS_PORT_MESSAGE) return;
+        if (event.ports.length !== 1) return;
+        const sourceRate = typeof data.sourceRate === 'number' ? data.sourceRate : 0;
+        ipcRenderer.postMessage('audio:rendererBusPort', { sourceRate }, [event.ports[0]]);
+    });
     contextBridge.exposeInMainWorld('feedBackDesktop', feedBackDesktopApi);
     // Legacy alias — plugins and external/community code built against the
     // pre-rename bridge still read window.slopsmithDesktop. Expose the same

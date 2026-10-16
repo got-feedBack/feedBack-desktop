@@ -59,6 +59,7 @@
   "audio:pushRendererAudio",
   "audio:removeProcessor",
   "audio:removeSource",
+  "audio:rendererBusPort",
   "audio:replaceIR",
   "audio:resetPeaks",
   "audio:saveDeviceSettings",
