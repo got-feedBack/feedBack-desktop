@@ -123,7 +123,9 @@ function findPythonExecutable(): string {
     }
 
     // Development: check for local venv first
-    const venvPython = path.join(__dirname, '..', '..', '.venv', 'bin', 'python3');
+    const venvPython = process.platform === 'win32'
+        ? path.join(__dirname, '..', '..', '.venv', 'Scripts', 'python.exe')
+        : path.join(__dirname, '..', '..', '.venv', 'bin', 'python3');
     if (fs.existsSync(venvPython)) return venvPython;
 
     return 'python3';

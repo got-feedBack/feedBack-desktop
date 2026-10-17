@@ -1,0 +1,4 @@
+# Shell scripts run under bash, including Git Bash on Windows: keep them LF on
+# checkout so a clone with core.autocrlf=true doesn't break them ($'\r': command
+# not found). They are already stored with LF; this only fixes the checkout.
+*.sh text eol=lf
