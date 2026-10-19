@@ -181,16 +181,12 @@ void ControlChannel::stop()
     if (impl && impl->fd >= 0)
         ::shutdown(impl->fd, SHUT_RDWR);
 
-    if (ioThread.joinable())
-    {
-        if (std::this_thread::get_id() == ioThread.get_id())
-            ioThread.detach();   // self-stop: self-join would deadlock
-        else
-            ioThread.join();
-    }
+    // Serialised join/detach — same double-join race as the Windows backend;
+    // see ThreadJoin.h and ControlChannel_win.cpp::stop.
+    joinThreadOnce(ioThread, impl->ioThreadJoin, "control-io");
 
-    if (impl)
     {
+        std::lock_guard<std::mutex> lk(impl->closeMutex);
         if (impl->fd >= 0)          { ::close(impl->fd);          impl->fd = -1; }
         if (impl->stopPipe[0] >= 0) { ::close(impl->stopPipe[0]); impl->stopPipe[0] = -1; }
         if (impl->stopPipe[1] >= 0) { ::close(impl->stopPipe[1]); impl->stopPipe[1] = -1; }

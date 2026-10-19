@@ -4,6 +4,7 @@
 #include "AddonContext.h"
 
 #include "../Sandbox/CrashAttribution.h"
+#include "../VSTTrace.h"
 
 #include <chrono>
 #include <cstdio>
@@ -60,12 +61,21 @@ static void startJuceMessageThread()
     juce::MessageManager::getInstance();
 #else
     juceMessageThread = std::thread([]() {
-        juce::MessageManager::getInstance();
-        while (juceRunning.load())
+        // Thread entry point: never let an exception escape - an uncaught
+        // C++ exception calls std::terminate and kills the whole host process.
+        try
         {
-            juce::MessageManager::getInstance()->runDispatchLoopUntil(50);
+            juce::MessageManager::getInstance();
+            while (juceRunning.load())
+            {
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(50);
+            }
+            juce::MessageManager::deleteInstance();
         }
-        juce::MessageManager::deleteInstance();
+        catch (...)
+        {
+            VST_TRACE("juceMessageThread: swallowed exception");
+        }
     });
 #endif
 }

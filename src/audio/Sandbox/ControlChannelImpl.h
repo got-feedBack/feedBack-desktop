@@ -9,6 +9,9 @@
 #pragma once
 
 #include "ControlChannel.h"
+#include "ThreadJoin.h"
+
+#include <mutex>
 
 #if JUCE_WINDOWS
  #include <windows.h>
@@ -19,6 +22,13 @@ namespace slopsmith::sandbox {
 struct ControlChannel::Impl
 {
     bool isServer = false;
+
+    // Serialises the ioThread join/detach in stop() across concurrent callers
+    // (teardown on the I/O thread itself via failWith -> onDisconnect, vs
+    // ~ControlChannel on the owner's thread) — see ThreadJoin.h.
+    ThreadJoinState ioThreadJoin;
+    // Serialises the handle/fd close tail of stop() between those callers.
+    std::mutex closeMutex;
 
 #if JUCE_WINDOWS
     HANDLE pipe = INVALID_HANDLE_VALUE;

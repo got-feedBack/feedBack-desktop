@@ -31,6 +31,29 @@ ControlChannel::~ControlChannel()
 
 void ControlChannel::ioLoop()
 {
+    // Thread entry point: never let an exception escape — an uncaught C++
+    // exception on any thread calls std::terminate and kills the whole host
+    // process. A throwing dispatch (plugin-originated event, decode failure,
+    // promise) fails the channel instead: failWith drains pending requests
+    // and fires onDisconnect so the owner tears down cleanly.
+    try
+    {
+        ioLoopBody();
+    }
+    catch (const std::exception& e)
+    {
+        CTL_TRACE("ioLoop: uncaught exception (%s) — failing channel", e.what());
+        try { failWith(kReasonReadError + " (ioLoop exception)"); } catch (...) {}
+    }
+    catch (...)
+    {
+        CTL_TRACE("ioLoop: uncaught unknown exception — failing channel");
+        try { failWith(kReasonReadError + " (ioLoop exception)"); } catch (...) {}
+    }
+}
+
+void ControlChannel::ioLoopBody()
+{
     CTL_TRACE("ioLoop entered (isServer=%d)", (int)impl->isServer);
     // Server side: wait for the sandbox to connect (or for stop()). The
     // platform decides what "connect" means; on a clean stop it returns false
