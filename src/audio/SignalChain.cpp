@@ -1,6 +1,12 @@
 #include "SignalChain.h"
 #include "Sandbox/SandboxedProcessor.h"
 #include <cmath>   // std::isfinite (postGain sanitisation)
+#include <functional>
+
+// Forward decl — resolveSlotHasEditor dispatches onto the JUCE message thread;
+// declaring it here avoids pulling AddonContext.h (→ AudioEngine.h) into this
+// translation unit.
+namespace slopsmith::addon { bool dispatchOnMessageThreadImpl(std::function<void()> func); }
 
 #if ! JUCE_WINDOWS
  #include <csetjmp>
@@ -214,6 +220,9 @@ SignalChain::~SignalChain()
     slots.clear();
 }
 
+// Forward decl — prepare() uses this before its definition further down.
+static void sizeSlotForChannels(ProcessorSlot& slot, int blockSize);
+
 void SignalChain::prepare(double sampleRate, int blockSize)
 {
     // Size the parallel-branch scratch once, off the audio thread. Stereo, the
@@ -236,6 +245,7 @@ void SignalChain::prepare(double sampleRate, int blockSize)
             p.setPlayConfigDetails(2, 2, sampleRate, blockSize);
             p.prepareToPlay(sampleRate, blockSize);
         });
+        sizeSlotForChannels(*slot, blockSize);
     }
 }
 
@@ -337,7 +347,31 @@ void SignalChain::processLocked(juce::AudioBuffer<float>& buffer, juce::MidiBuff
         for (int i = 0; i < numDrained; ++i)
             if (drained[i].slotId == slot->id || drained[i].slotId == -1)
                 slotMidi.addEvent(drained[i].msg, 0);
-        invokePlugin(*slot, [&](juce::AudioProcessor& p) { p.processBlock(buf, slotMidi); });
+        if (slot->pluginChannels > buf.getNumChannels())
+        {
+            // Multi-bus / wide-layout VST3 (e.g. Neural DSP Archetype reports
+            // extra output buses): JUCE's VST3 wrapper hands the plugin one raw
+            // pointer per plugin channel straight into the buffer we pass, so
+            // processing in place on the stereo chain bus would be a heap
+            // overwrite. Process into the per-slot scratch sized to the plugin,
+            // then fold the main bus (first channels) back into the chain
+            // buffer, like a DAW that only routes the main output.
+            juce::AudioBuffer<float>& scratch = slot->scratch;
+            if (scratch.getNumChannels() < slot->pluginChannels || scratch.getNumSamples() < numSamples)
+                scratch.setSize(slot->pluginChannels, numSamples, false, false, true);
+            const int copyCh = juce::jmin(buf.getNumChannels(), slot->pluginChannels);
+            for (int ch = 0; ch < copyCh; ++ch)
+                scratch.copyFrom(ch, 0, buf, ch, 0, numSamples);
+            for (int ch = copyCh; ch < slot->pluginChannels; ++ch)
+                scratch.clear(ch, 0, numSamples);
+            invokePlugin(*slot, [&](juce::AudioProcessor& p) { p.processBlock(scratch, slotMidi); });
+            for (int ch = 0; ch < copyCh; ++ch)
+                buf.copyFrom(ch, 0, scratch, ch, 0, numSamples);
+        }
+        else
+        {
+            invokePlugin(*slot, [&](juce::AudioProcessor& p) { p.processBlock(buf, slotMidi); });
+        }
         applyPan(buf, numSamples, slot->pan);
         if (slot->postGain != 1.0f)
             buf.applyGain(0, numSamples, slot->postGain);
@@ -447,6 +481,54 @@ static void prepareForPlayback(juce::AudioProcessor& p, double sampleRate, int b
     p.prepareToPlay(sampleRate, blockSize);
 }
 
+// Cache a slot's plugin channel count and pre-size its scratch. Called from the
+// prepare paths (off the audio thread); the RT path only reads pluginChannels
+// and reuses the pre-sized scratch, so it never allocates.
+static void sizeSlotForChannels(ProcessorSlot& slot, int blockSize)
+{
+    if (! slot.processor)
+    {
+        slot.pluginChannels = 2;
+        return;
+    }
+    slot.pluginChannels = juce::jmax(2, juce::jmax(slot.processor->getTotalNumInputChannels(),
+                                                     slot.processor->getTotalNumOutputChannels()));
+    if (slot.pluginChannels > 2 && blockSize > 0)
+        slot.scratch.setSize(slot.pluginChannels, blockSize, false, false, true);
+}
+
+// Resolve a slot's hasEditor() once, on the JUCE message thread — the thread
+// the plugin was constructed on (createPluginInstanceAsync fires its callback
+// there), i.e. the plugin's COM apartment. Some plugins (Neural DSP
+// Archetype/Gojira) fault inside hasEditor() when it is called from any other
+// thread; the renderer's getChainState()/openPluginEditor() run on the UI
+// thread and must never call into a native plugin — they read the cached
+// ProcessorSlot::hasEditor instead. Contained: a faulting hasEditor() degrades
+// to "no editor" for this slot and must NOT blocklist/release the processor
+// (the plugin is fine for audio), so this deliberately does not go through
+// invokePlugin, whose catch blocklists + releases on fault.
+static void resolveSlotHasEditor(ProcessorSlot& slot)
+{
+    // NAM / IR / empty slots have no editor by construction.
+    if (slot.type != ProcessorSlot::Type::VST || ! slot.processor)
+    {
+        slot.hasEditor = false;
+        return;
+    }
+
+    auto query = [&slot]()
+    {
+        try { slot.hasEditor = slot.processor->hasEditor(); }
+        catch (...) { slot.hasEditor = false; }
+    };
+
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm == nullptr || mm->isThisTheMessageThread())
+        query(); // already on the message thread (or no pump): run inline
+    else
+        slopsmith::addon::dispatchOnMessageThreadImpl(query);
+}
+
 int SignalChain::addProcessor(std::unique_ptr<juce::AudioProcessor> processor,
                                ProcessorSlot::Type type,
                                const juce::String& name,
@@ -478,6 +560,12 @@ int SignalChain::addProcessor(std::unique_ptr<juce::AudioProcessor> processor,
     });
     if (! slot->processor) return -1;
 
+    // Cache hasEditor before the slot becomes visible to the UI thread —
+    // see resolveSlotHasEditor. Runs off the audio lock: the dispatch blocks
+    // until the message thread answers, and the RT path must never see this
+    // lock held for that long (it ScopedTryLock-drops blocks otherwise).
+    resolveSlotHasEditor(*slot);
+
     int id = slot->id;
     const juce::ScopedLock sl(lock);
     if (currentSampleRate != prepSr || currentBlockSize != prepBs)
@@ -494,6 +582,7 @@ int SignalChain::addProcessor(std::unique_ptr<juce::AudioProcessor> processor,
         });
         if (! slot->processor) return -1;
     }
+    sizeSlotForChannels(*slot, currentBlockSize);
     slots.add(slot.release());
     return id;
 }
@@ -537,6 +626,8 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
     });
     if (! staging.processor) return false;   // faulted during prepare → leave the slot as-is
 
+    sizeSlotForChannels(staging, currentBlockSize);
+
     std::unique_ptr<juce::AudioProcessor> old;
     {
         const juce::ScopedLock sl(lock);
@@ -563,6 +654,8 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
         auto* slot = slots[idx];
         old = std::move(slot->processor);
         slot->processor = std::move(staging.processor);
+        slot->pluginChannels = staging.pluginChannels;
+        slot->scratch = std::move(staging.scratch);
         // Swap succeeded: adopt the new identity so getChainState()/preset save
         // report the swapped-in processor, not the one it replaced. Only when
         // provided — the sandbox-promotion caller passes none and keeps identity.
@@ -581,11 +674,13 @@ bool SignalChain::replaceProcessor(int slotId, std::unique_ptr<juce::AudioProces
 
 bool SignalChain::captureVstStateForPromotion(int slotId, juce::MemoryBlock& state)
 {
-    // Hold the audio lock across the whole check+snapshot: hasEditor() and
-    // getStateInformation() are plugin calls on a LIVE processor, and process()
-    // runs processBlock on that same instance under this lock (ScopedTryLock, so
-    // it simply drops a block here rather than deadlocking). Doing the snapshot
-    // off-lock would be a data race with the audio thread.
+    // Hold the audio lock across the snapshot: getStateInformation() is a plugin
+    // call on a LIVE processor, and process() runs processBlock on that same
+    // instance under this lock (ScopedTryLock, so it simply drops a block here
+    // rather than deadlocking). Doing the snapshot off-lock would be a data race
+    // with the audio thread. hasEditor() is NOT called here — it is cached at
+    // add time (slot->hasEditor) because this runs on the UI thread and some
+    // plugins fault in hasEditor() off their COM apartment.
     const juce::ScopedLock sl(lock);
     const int idx = findSlotIndex(slotId);
     if (idx < 0) return false;
@@ -596,13 +691,16 @@ bool SignalChain::captureVstStateForPromotion(int slotId, juce::MemoryBlock& sta
     if (dynamic_cast<slopsmith::sandbox::SandboxedProcessor*>(slot->processor.get()) != nullptr)
         return false;
 
-    // Run the plugin calls under invokePlugin's SEH/signal guard: a plugin that
-    // faults in hasEditor()/getStateInformation() is contained + blocklisted +
+    // Editor-less VST3 → nothing to open. Reads the add-time cache — never call
+    // hasEditor() on the UI thread (see resolveSlotHasEditor).
+    if (! slot->hasEditor) return false;
+
+    // Run the remaining plugin call under invokePlugin's SEH/signal guard: a
+    // plugin that faults in getStateInformation() is contained + blocklisted +
     // released (leaving slot->processor null), never fatal.
     bool promotable = false;
     invokePlugin(*slot, [&](juce::AudioProcessor& p)
     {
-        if (! p.hasEditor()) return;   // editor-less VST3 → nothing to open
         p.getStateInformation(state);
         promotable = true;
     });
@@ -720,8 +818,12 @@ std::vector<SignalChain::SlotSummary> SignalChain::getSlotSummaries() const
         // Safe under `lock`: clear() detaches the slots under the same lock
         // before destroying them, so a slot reachable here cannot be freed
         // mid-call. The RT thread uses a ScopedTryLock, so holding it for this
-        // metadata copy never blocks the audio callback.
-        s.hasEditor = slot->processor != nullptr && slot->processor->hasEditor();
+        // metadata copy never blocks the audio callback. hasEditor is the
+        // add-time cache — this must NOT call into the plugin: getChainState
+        // runs on the UI thread (the renderer polls it constantly) and some
+        // plugins (Neural DSP Archetype/Gojira) fault in hasEditor() off their
+        // COM apartment.
+        s.hasEditor = slot->hasEditor;
         result.push_back(std::move(s));
     }
     return result;

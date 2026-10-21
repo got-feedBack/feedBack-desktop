@@ -113,11 +113,21 @@ bool SubprocessHandle::start(const juce::String& exePath,
     HANDLE procHandle = impl->pi.hProcess;
     watcher = std::thread([this, procHandle]
     {
-        WaitForSingleObject(procHandle, INFINITE);
-        DWORD code = 0;
-        GetExitCodeProcess(procHandle, &code);
-        running.store(false, std::memory_order_release);
-        if (onExitCb) onExitCb((int)code);
+        // Thread entry point: never let an exception escape — an uncaught
+        // C++ exception calls std::terminate and kills the whole host process.
+        try
+        {
+            WaitForSingleObject(procHandle, INFINITE);
+            DWORD code = 0;
+            GetExitCodeProcess(procHandle, &code);
+            running.store(false, std::memory_order_release);
+            if (onExitCb) onExitCb((int)code);
+        }
+        catch (...)
+        {
+            VST_TRACE("SubprocessHandle watcher: swallowed exception");
+            running.store(false, std::memory_order_release);
+        }
     });
     return true;
 }
@@ -144,35 +154,25 @@ void SubprocessHandle::shutdown(int timeoutMs)
             TerminateProcess(impl->pi.hProcess, 1);
     }
 
-    if (watcher.joinable())
-    {
-        if (std::this_thread::get_id() == watcher.get_id())
-        {
-            // Self-join would deadlock. Detaching leaves the watcher
-            // thread alive briefly past this destructor's return, which
-            // would normally be a UAF on captured `this`. Two things
-            // make it safe here:
-            //   1. SandboxedProcessor::teardown drops the onCrash
-            //      callback BEFORE invoking subprocess->shutdown(), so
-            //      the watcher's onExitCb fires into a no-op when this
-            //      path is reached.
-            //   2. The watcher's remaining work after onExitCb is just
-            //      `running.store(false)` and falling off the lambda —
-            //      no member-state access beyond the atomic.
-            // If a future refactor adds member access in the watcher
-            // after onExitCb, revisit this — a `resourcesReleased`
-            // latch + shared_ptr captured into the lambda is the
-            // standard fix.
-            watcher.detach();
-        }
-        else
-            watcher.join();
-    }
+    // Serialised join/detach: shutdown() can run concurrently on the control
+    // I/O thread (teardown via failWith -> onDisconnect) and on the owner's
+    // thread (~SubprocessHandle — NOT covered by teardown's single-fire latch).
+    // Two racing join() calls made the loser throw std::system_error(ESRCH)
+    // (the winner's join had closed the thread handle); the escaping exception
+    // std::terminate'd the whole process. Self-shutdown (watcher thread) is
+    // handled inside joinThreadOnce as a detach — safe because the watcher
+    // touches no member state after onExitCb returns. See ThreadJoin.h.
+    joinThreadOnce(watcher, impl->watcherJoin, "subprocess-watcher");
 
     // Always close handles — when the watcher detected a crash, `running` is
     // already false here, but the kernel handles are still ours to release.
-    if (impl->pi.hThread)  { CloseHandle(impl->pi.hThread);  impl->pi.hThread = nullptr; }
-    if (impl->pi.hProcess) { CloseHandle(impl->pi.hProcess); impl->pi.hProcess = nullptr; }
+    // Serialised: two shutdown() callers can reach this concurrently, and
+    // CloseHandle-ing the same handle twice risks closing a recycled value.
+    {
+        std::lock_guard<std::mutex> lk(impl->closeMutex);
+        if (impl->pi.hThread)  { CloseHandle(impl->pi.hThread);  impl->pi.hThread = nullptr; }
+        if (impl->pi.hProcess) { CloseHandle(impl->pi.hProcess); impl->pi.hProcess = nullptr; }
+    }
 }
 
 } // namespace slopsmith::sandbox

@@ -130,7 +130,10 @@ Napi::Value OpenPluginEditor(const Napi::CallbackInfo& info)
         return Napi::Boolean::New(env, false);
 
     auto slot = liveEngine->getSignalChain().getSlot(slotId);
-    if (!slot || !slot->processor || !slot->processor->hasEditor())
+    // hasEditor is the add-time cache — do NOT call slot->processor->hasEditor()
+    // here: this is the UI thread and some plugins fault in hasEditor() off
+    // their COM apartment (see resolveSlotHasEditor in SignalChain.cpp).
+    if (!slot || !slot->processor || !slot->hasEditor)
         return Napi::Boolean::New(env, false);
 
     // Sandboxed plugins: the editor is a top-level window owned by the

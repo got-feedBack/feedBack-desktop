@@ -31,6 +31,7 @@
 #include "addon/ChainOps.h"
 #include "addon/EditorWindows.h"
 #include "addon/Bindings.h"
+#include "addon/GuardedAsyncWorker.h"
 
 using slopsmith::addon::closeAllPluginEditorWindows;
 using slopsmith::addon::destroyAllPluginEditorWindowsOnMessageThread;
@@ -170,13 +171,13 @@ static Napi::Value Shutdown(const Napi::CallbackInfo& info)
 
 // ── VST Plugin Scanning ──────────────────────────────────────────────────────
 
-class ScanPluginsWorker : public Napi::AsyncWorker
+class ScanPluginsWorker : public slopsmith::addon::GuardedAsyncWorker<ScanPluginsWorker>
 {
 public:
     ScanPluginsWorker(Napi::Env env, Napi::Promise::Deferred deferred, juce::StringArray dirs)
-        : Napi::AsyncWorker(env), deferred(deferred), directories(std::move(dirs)) {}
+        : slopsmith::addon::GuardedAsyncWorker<ScanPluginsWorker>(env), deferred(deferred), directories(std::move(dirs)) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         auto host = snapshotVstHost();
         if (!host) return;

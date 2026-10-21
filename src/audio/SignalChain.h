@@ -35,6 +35,25 @@ struct ProcessorSlot
     // the per-amp loudness trim / per-branch level; 1.0 (default) = no-op.
     float postGain = 1.0f;
 
+    // Cached hasEditor(), resolved once at add time on the plugin's message
+    // thread (see resolveSlotHasEditor in SignalChain.cpp). The UI thread must
+    // never call hasEditor() on a native plugin — some plugins (Neural DSP
+    // Archetype/Gojira) fault in hasEditor() off their COM apartment — so
+    // getSlotSummaries()/openPluginEditor() read this flag instead.
+    bool hasEditor = false;
+
+    // Channels the processor exposes across its buses — max(total in, total
+    // out), floored at the chain's stereo width. A VST3 with extra buses or a
+    // wide default layout (e.g. Neural DSP Archetype reports extra output
+    // buses) reports more than 2; JUCE's VST3 wrapper then hands the plugin one
+    // raw pointer per plugin channel straight into the buffer passed to
+    // processBlock, so an undersized buffer is a heap overwrite (0xC0000374 in
+    // ntdll). Slots wider than the chain bus process through `scratch` and fold
+    // their main bus (first two channels) back — the same clamp the vst-host
+    // sandbox applies on its side.
+    int pluginChannels = 2;
+    juce::AudioBuffer<float> scratch;
+
     // For VST plugins — their state as base64 for preset save/load
     juce::MemoryBlock getState() const;
     void setState(const juce::MemoryBlock& state);

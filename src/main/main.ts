@@ -120,7 +120,7 @@ import {
     IPC_WINDOW_GET_START_FULLSCREEN,
     IPC_WINDOW_SET_START_FULLSCREEN,
 } from './ipc-channels';
-import { initAudioBridge, shutdownAudio } from './audio-bridge';
+import { initAudioBridge, shutdownAudio, flushVstBlockedNotifications } from './audio-bridge';
 import { initDebugLogging, isDebugEnabled } from './debug-log';
 import { initPluginManager } from './plugin-manager';
 import { initSoundfontManager, getDesktopConfig, setDesktopConfig } from './soundfont-manager';
@@ -665,6 +665,11 @@ function createWindow(port: number): void {
         mainWindow?.webContents.executeJavaScript(`
             window._slopsmithSyncOffset = parseFloat(localStorage.getItem('slopsmith-sync-offset') || '0.2');
         `).catch(() => {});
+        // Tell the renderer about any plugins the VST crash guard blocklisted
+        // at startup (it crossed the consecutive-crash threshold while the app
+        // was down). Deferred until now because at initAudioBridge() time only
+        // the splash window exists, which has no vst listener.
+        flushVstBlockedNotifications();
         // The renderer has painted, so the app is usable — dismiss the splash
         // even though plugins may still be installing in the background. Their
         // status streams to the renderer (SSE) and renders as disabled

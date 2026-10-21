@@ -339,7 +339,7 @@ struct HostState
     std::thread audioThread;
     std::atomic<int> sampleRate{48000};
     std::atomic<int> blockSize{256};
-    int channels = 2;                   // const after argv parse — main thread only
+    int channels = 2;                   // worker buffer width — argv hint, resized at load to the plugin's channel count; main thread only, before the audio thread starts
 
     std::atomic<bool>    audioPauseRequested{false};
     juce::WaitableEvent  audioPausedAck;    // audio thread → control thread
@@ -603,6 +603,11 @@ void runAudioThread(HostState& st)
     buffer.setSize(st.channels, currentBlockSize,
                    /*keep*/false, /*clear*/true, /*avoidRealloc*/true);
     juce::MidiBuffer midi;
+    // Counts processBlock exceptions contained per block (see the try/catch
+    // around the processBlock call below): a faulting plugin must not kill
+    // this thread — the worker stays alive and pushes silence for the
+    // faulting block.
+    juce::uint64 processFaults = 0;
     while (st.running.load(std::memory_order_acquire))
     {
         if (st.audioPauseRequested.load(std::memory_order_acquire))
@@ -677,7 +682,23 @@ void runAudioThread(HostState& st)
             // amp/EQ/comp IIR tails spike CPU and stutter the audio. (Key fix for
             // the user's all-VST chains.)
             const juce::ScopedNoDenormals noDenormals;
-            p->processBlock(buffer, midi);
+            // Contain plugin exceptions PER BLOCK. Letting one escape would
+            // unwind runAudioThread into the thread-level catch-all: the
+            // worker stops consuming input, the host's popBlock times out
+            // and xruns forever — permanent silence while the slot stays
+            // active (exactly what a channel-count mismatch used to cause).
+            // Push silence for the faulting block and keep the worker
+            // alive; the thread-level catch-all stays as the last resort.
+            try { p->processBlock(buffer, midi); }
+            catch (...)
+            {
+                buffer.clear();
+                const juce::uint64 faults = ++processFaults;
+                if (faults <= 3 || faults % 1000 == 0)
+                    hostLogf("processBlock threw (fault #%llu) — pushed "
+                             "silence, worker alive",
+                             (unsigned long long)faults);
+            }
         }
         st.audio.pushBlock(/*isOutputRing=*/true, buffer, currentBlockSize);
     }
@@ -1511,6 +1532,47 @@ static void installLinuxParentDeathSignal()
 #endif
 
 #if JUCE_WINDOWS
+// Runs one message-dispatch tick inside a native SEH __try/__except.
+// Isolated in its own function because MSVC error C2712 forbids __try in
+// functions that have C++ objects requiring unwinding (main() has several:
+// ScopedJuceInitialiser_GUI, HostState, std::jthread, ...). This helper has
+// only POD parameters (pointer + bool), so __try is legal here.
+//
+// Native SEH is used instead of C++ try/catch deliberately: with /EHa, a
+// C++ catch(...) unwinds through C++ destructors; if a plugin destructor
+// touches state that the faulting call left inconsistent, the destructor
+// itself faults during unwinding -> std::terminate -> silent death.
+// __try/__except unwinds via .pdata only (no destructor calls), so the
+// sandbox child survives. Leaked resources from skipped destructors are
+// acceptable: this is a disposable sandbox process.
+//
+// Contain plugin exceptions PER DISPATCH TICK: a misbehaving plugin (e.g.
+// PolyChrome DSP suites calling a bad function pointer from a timer/message
+// callback on this thread) raises an access violation during message
+// dispatch. Letting it escape would unwind into the thread-level catch-all
+// and kill the sandbox child — the host sees a broken pipe and the slot
+// goes permanently silent.
+static unsigned long long g_dispatchFaults = 0;
+
+static void runDispatchTickSehSafe(juce::MessageManager* mm, bool isLoadLoop)
+{
+    __try
+    {
+        mm->runDispatchLoopUntil(20);
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+              ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        const unsigned long long faults = ++g_dispatchFaults;
+        if (faults <= 3 || faults % 100 == 0)
+            hostLogf("%s dispatch: access violation caught (fault #%llu) — "
+                     "continuing message loop",
+                     isLoadLoop ? "load" : "message", faults);
+    }
+}
+#endif // JUCE_WINDOWS
+
+#if JUCE_WINDOWS
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 {
     {
@@ -1744,15 +1806,25 @@ int main(int argc, char** argv)
     // load) skips the join — TerminateProcess/_Exit ends every thread anyway.
     std::thread heartbeatThread([&st, &loadDone]
     {
-        constexpr int kHeartbeatSlices = 50;   // 50 * 100ms ≈ 5s between beats
-        while (!loadDone.load(std::memory_order_acquire))
+        // Thread entry point: never let an exception escape — an uncaught
+        // C++ exception calls std::terminate and kills the child (the host
+        // would see a crash instead of a clean load failure).
+        try
         {
-            for (int i = 0; i < kHeartbeatSlices
-                            && !loadDone.load(std::memory_order_acquire); ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (loadDone.load(std::memory_order_acquire))
-                break;
-            st.control.sendEvent(event::kLoading, {});
+            constexpr int kHeartbeatSlices = 50;   // 50 * 100ms ≈ 5s between beats
+            while (!loadDone.load(std::memory_order_acquire))
+            {
+                for (int i = 0; i < kHeartbeatSlices
+                                && !loadDone.load(std::memory_order_acquire); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (loadDone.load(std::memory_order_acquire))
+                    break;
+                st.control.sendEvent(event::kLoading, {});
+            }
+        }
+        catch (...)
+        {
+            hostLogf("heartbeat thread: swallowed exception");
         }
     });
 
@@ -1762,7 +1834,14 @@ int main(int argc, char** argv)
         auto* mm = juce::MessageManager::getInstance();
         while (!loadDone.load(std::memory_order_acquire))
         {
+            // Same per-tick containment as the main dispatch loop: a plugin
+            // that faults during a load-time message callback must not kill
+            // the sandbox child before it can report ready.
+#if JUCE_WINDOWS
+            runDispatchTickSehSafe(mm, /*isLoadLoop=*/true);
+#else
             mm->runDispatchLoopUntil(20);
+#endif
             // If the host gives up and posts WM_QUIT (SubprocessHandle::
             // shutdown), the load is unrecoverable: createPluginInstanceAsync
             // can't be cancelled, and runDispatchLoopUntil stops pumping once
@@ -1802,48 +1881,54 @@ int main(int argc, char** argv)
         return 5;
     }
     hostLogf("plugin loaded: %s", st.plugin->getName().toRawUTF8());
-    // Clamp the audio worker's channel count to what the plugin actually
+    // Size the audio worker's channel count to what the plugin actually
     // reports. spawn-time --channels is a hint (the host doesn't know the
     // real topology until the plugin loads); using the plugin's
-    // getTotalNumIn/OutChannels prevents undersized buffers being passed
-    // to a mono effect or extra silent channels for a >stereo synth.
-    // BusesProperties-aware buffer sizing is the deferred follow-up;
-    // until then take the max of in/out so the buffer is at least big
-    // enough for either direction.
+    // getTotalNumIn/OutChannels guarantees the buffer handed to
+    // processBlock is wide enough for either direction. A buffer NARROWER
+    // than the plugin's enabled buses makes processBlock write out of
+    // bounds — observed with a cracked plugin reporting 32 stereo output
+    // buses while the worker ran on a 2-channel buffer: the OOB write
+    // threw on the audio thread, the thread-level catch-all killed
+    // runAudioThread, and the host heard permanent silence while the slot
+    // stayed active.
+    // The SHM ring width stays fixed at spawn time (SandboxFactory_win
+    // currently hardcodes 2; cf. the deferred BusesProperties refactor
+    // that would size SHM from the plugin's reported topology). Only the
+    // ring TRANSFER is clamped, never the worker buffer: popInputBlock
+    // zero-pads the worker buffer's channels beyond header->maxChannels
+    // and pushBlock drops the worker buffer's extra output channels (both
+    // cap at header->maxChannels), so the main bus round-trips intact.
     {
+        // Hard ceiling on the worker buffer width: a plugin (cracked or
+        // hostile) reporting an absurd channel count must not be able to
+        // make us allocate an absurd buffer. 256ch x 1024 samples x 4B
+        // stays ~1MB — same order of magnitude as today's rings.
+        constexpr int kMaxWorkerChannels = 256;
         const int pIn  = st.plugin->getTotalNumInputChannels();
         const int pOut = st.plugin->getTotalNumOutputChannels();
         const int pMax = juce::jmax(pIn, pOut);
         const int shmCh = (int)st.audio.dims().maxChannels;
-        if (pMax > (int)kAudioMaxChannels)
+        // Worker buffer follows the plugin, but never below the ring
+        // width (a narrower buffer would break the transfer) and never
+        // above kMaxWorkerChannels.
+        const int effective = juce::jmax(shmCh, juce::jmin(pMax, kMaxWorkerChannels));
+        if (pMax > kMaxWorkerChannels)
         {
-            // Fail closed against the absolute protocol cap. A plugin
-            // reporting >kAudioMaxChannels means our protocol literally
-            // can't represent its topology.
-            hostLogf("plugin reports %d channels, exceeding protocol cap %d",
-                     pMax, (int)kAudioMaxChannels);
-            st.control.sendEvent(event::kGoodbye, {});
-            return 5;
+            hostLogf("WARNING: plugin reports %d channels, exceeding the "
+                     "worker buffer cap %d — clamping worker to %d. Channels "
+                     "beyond the SHM ring width %d see zero-padded input and "
+                     "have their output dropped.",
+                     pMax, kMaxWorkerChannels, effective, shmCh);
         }
-        // The SHM ring width is fixed at spawn time (SandboxFactory_win
-        // currently hardcodes 2; cf. the deferred BusesProperties
-        // refactor that would size SHM from the plugin's reported
-        // topology). If the plugin reports more channels than the ring
-        // can carry, the audio worker runs with a clamped buffer:
-        // pushBlock/popBlock cap at header->maxChannels and the plugin
-        // sees zero-padded input on its extra channels. Today's only
-        // sandboxed plugin (Guitar Rig 6) reports 4-channel topology
-        // (sidechain) but works fine on 2-channel buffers, so clamping
-        // is the pragmatic choice — loudly logged so the limitation is
-        // visible in the diagnostic trail.
-        const int effective = juce::jmin(pMax, shmCh);
-        if (pMax > shmCh)
+        else if (pMax > shmCh)
         {
             hostLogf("WARNING: plugin reports %d channels but SHM ring width "
-                     "is %d — clamping to %d. Plugin's extra channels will "
-                     "see zero-padded input and their output will be dropped. "
-                     "Deferred fix: BusesProperties refactor sizes SHM from "
-                     "plugin topology.", pMax, shmCh, effective);
+                     "is %d — worker buffer sized to the plugin (%d), SHM "
+                     "transfer clamped to %d. Extra channels see zero-padded "
+                     "input and have their output dropped. Deferred fix: "
+                     "BusesProperties refactor sizes SHM from plugin topology.",
+                     pMax, shmCh, effective, shmCh);
         }
         if (effective > 0 && effective != st.channels)
         {
@@ -1871,7 +1956,15 @@ int main(int argc, char** argv)
     // the control I/O thread always has a worker to ack the pause flag —
     // otherwise an early kPrepare would deadlock in AudioPauseGuard waiting
     // forever on audioPausedAck.
-    st.audioThread = std::thread([&st] { runAudioThread(st); });
+    st.audioThread = std::thread([&st]
+    {
+        // Thread entry point: never let an exception escape — an uncaught
+        // C++ exception (e.g. a plugin throwing from processBlock) calls
+        // std::terminate and kills the child; the host would see a crash
+        // instead of silence.
+        try { runAudioThread(st); }
+        catch (...) { hostLogf("audio thread: swallowed exception"); }
+    });
 
     auto stopAudioWorker = [&st]
     {
@@ -1934,7 +2027,18 @@ int main(int argc, char** argv)
     auto* mm = juce::MessageManager::getInstance();
     while (st.running.load(std::memory_order_acquire)
            && !mm->hasStopMessageBeenSent())
+    {
+        // Contain plugin exceptions PER DISPATCH TICK (see
+        // runDispatchTickSehSafe above for the rationale): a misbehaving
+        // plugin that raises an access violation during message dispatch
+        // must not kill the sandbox child — the host sees a broken pipe
+        // and the slot goes permanently silent.
+#if JUCE_WINDOWS
+        runDispatchTickSehSafe(mm, /*isLoadLoop=*/false);
+#else
         mm->runDispatchLoopUntil(20);
+#endif
+    }
 
     // The loop can exit because hasStopMessageBeenSent() is true while
     // st.running is still true (host sent WM_QUIT but never kShutdown).

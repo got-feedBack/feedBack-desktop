@@ -136,31 +136,30 @@ void ControlChannel::stop()
     if (impl && impl->pipe != INVALID_HANDLE_VALUE)
         CancelIoEx(impl->pipe, nullptr);
 
-    if (ioThread.joinable())
-    {
-        if (std::this_thread::get_id() == ioThread.get_id())
-        {
-            // Self-stop: the I/O thread is unwinding through ioLoop /
-            // failWith / disconnect-callback / our caller into here.
-            // Detaching is the only choice (self-join deadlocks); the
-            // CancelIoEx + SetEvent above already shoved the I/O thread past
-            // any blocking syscall on the handles, so the window between
-            // detach and CloseHandle is just stack unwinding.
-            ioThread.detach();
-        }
-        else
-            ioThread.join();
-    }
+    // Serialised join/detach: stop() can run concurrently on the I/O thread
+    // itself (failWith -> onDisconnect -> teardown -> stop) and on the owner's
+    // thread (~ControlChannel — NOT covered by teardown's single-fire latch).
+    // Two racing join() calls made the loser throw std::system_error (the
+    // winner's join had closed the thread handle); the escaping exception
+    // std::terminate'd the whole process. Self-stop is handled inside
+    // joinThreadOnce as a detach. See ThreadJoin.h.
+    joinThreadOnce(ioThread, impl->ioThreadJoin, "control-io");
 
-    if (impl && impl->pipe != INVALID_HANDLE_VALUE)
+    // The handle close is serialised too: two stop() callers can reach this
+    // concurrently, and CloseHandle-ing the same handle twice risks closing a
+    // recycled value.
     {
-        CloseHandle(impl->pipe);
-        impl->pipe = INVALID_HANDLE_VALUE;
-    }
-    if (impl && impl->stopEvent != nullptr)
-    {
-        CloseHandle(impl->stopEvent);
-        impl->stopEvent = nullptr;
+        std::lock_guard<std::mutex> lk(impl->closeMutex);
+        if (impl->pipe != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(impl->pipe);
+            impl->pipe = INVALID_HANDLE_VALUE;
+        }
+        if (impl->stopEvent != nullptr)
+        {
+            CloseHandle(impl->stopEvent);
+            impl->stopEvent = nullptr;
+        }
     }
 
     // Fail any in-flight requests so callers don't hang.

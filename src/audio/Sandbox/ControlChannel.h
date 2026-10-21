@@ -128,6 +128,10 @@ private:
     // failWith. Platform-defined.
     bool waitForPeer(juce::String& failReason);
     void ioLoop();
+    // ioLoop() body — the frame dispatch loop. Split out so ioLoop() can wrap
+    // it in a catch-all: an exception escaping a thread entry point calls
+    // std::terminate and kills the whole host process.
+    void ioLoopBody();
     void failWith(const juce::String& reason);
 
     // Set by readFrame() before it returns false so ioLoop can classify the

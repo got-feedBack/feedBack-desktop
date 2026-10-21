@@ -8,6 +8,7 @@
 
 #include "AddonContext.h"
 #include "NapiHelpers.h"
+#include "GuardedAsyncWorker.h"
 #include "EditorWindows.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
@@ -74,14 +75,14 @@ bool isChainRebuildPending()
 namespace {
 
 // As above, but the mutation yields a slot id (resolved as a Number).
-class ChainSlotMutationWorker : public Napi::AsyncWorker
+class ChainSlotMutationWorker : public GuardedAsyncWorker<ChainSlotMutationWorker>
 {
 public:
     ChainSlotMutationWorker(Napi::Env env, Napi::Promise::Deferred deferred,
                             std::function<int(AudioEngine&)> mutate)
-        : Napi::AsyncWorker(env), deferred_(deferred), mutate_(std::move(mutate)) {}
+        : GuardedAsyncWorker(env), deferred_(deferred), mutate_(std::move(mutate)) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
         auto liveEngine = snapshotEngine();
@@ -100,17 +101,17 @@ private:
     int slotId_ = -1;
 };
 
-class ChainMutationWorker : public Napi::AsyncWorker
+class ChainMutationWorker : public GuardedAsyncWorker<ChainMutationWorker>
 {
 public:
     ChainMutationWorker(Napi::Env env, Napi::Promise::Deferred deferred,
                         std::function<void(AudioEngine&)> mutate, bool releasesBarrier)
-        : Napi::AsyncWorker(env)
+        : GuardedAsyncWorker(env)
         , deferred_(deferred)
         , mutate_(std::move(mutate))
         , releasesBarrier_(releasesBarrier) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         struct BarrierRelease {
             bool armed;
@@ -416,15 +417,15 @@ std::unique_ptr<juce::AudioProcessor> loadVstSandboxAware(
 
 // ── VST/NAM/IR workers + handlers (moved verbatim from NodeAddon.cpp) ────────────────────
 
-class LoadVSTWorker : public Napi::AsyncWorker
+class LoadVSTWorker : public GuardedAsyncWorker<LoadVSTWorker>
 {
 public:
     LoadVSTWorker(Napi::Env env, Napi::Promise::Deferred deferred, std::string path)
-        : Napi::AsyncWorker(env)
+        : GuardedAsyncWorker(env)
         , deferred_(deferred)
         , pluginPath_(std::move(path)) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
         // workers on the libuv pool must not interleave clear()/addProcessor().
@@ -633,13 +634,13 @@ Napi::Value LoadVST(const Napi::CallbackInfo& info)
    #endif
 }
 
-class LoadNAMWorker : public Napi::AsyncWorker
+class LoadNAMWorker : public GuardedAsyncWorker<LoadNAMWorker>
 {
 public:
     LoadNAMWorker(Napi::Env env, Napi::Promise::Deferred deferred, std::string path)
-        : Napi::AsyncWorker(env), deferred_(deferred), modelPath_(std::move(path)) {}
+        : GuardedAsyncWorker(env), deferred_(deferred), modelPath_(std::move(path)) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
         // workers on the libuv pool must not interleave clear()/addProcessor().
@@ -686,13 +687,13 @@ Napi::Value LoadNAMModel(const Napi::CallbackInfo& info)
     return deferred.Promise();
 }
 
-class LoadIRWorker : public Napi::AsyncWorker
+class LoadIRWorker : public GuardedAsyncWorker<LoadIRWorker>
 {
 public:
     LoadIRWorker(Napi::Env env, Napi::Promise::Deferred deferred, std::string path)
-        : Napi::AsyncWorker(env), deferred_(deferred), irPath_(std::move(path)) {}
+        : GuardedAsyncWorker(env), deferred_(deferred), irPath_(std::move(path)) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
         // workers on the libuv pool must not interleave clear()/addProcessor().
@@ -748,15 +749,15 @@ Napi::Value LoadIR(const Napi::CallbackInfo& info)
 // Mirrors LoadIRWorker but calls SignalChain::replaceProcessor(slotId, …) instead
 // of addProcessor. Optional `gain` (>=0) updates the slot's post-gain (the cab
 // makeup); a negative gain leaves the existing post-gain untouched.
-class ReplaceIRWorker : public Napi::AsyncWorker
+class ReplaceIRWorker : public GuardedAsyncWorker<ReplaceIRWorker>
 {
 public:
     ReplaceIRWorker(Napi::Env env, Napi::Promise::Deferred deferred,
                     int slotId, std::string path, float gain)
-        : Napi::AsyncWorker(env), deferred_(deferred),
+        : GuardedAsyncWorker(env), deferred_(deferred),
           slotId_(slotId), irPath_(std::move(path)), gain_(gain) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         // Serialize the FULL mutation (TLC deep-read 1): overlapping chain
         // workers on the libuv pool must not interleave clear()/addProcessor().
@@ -816,13 +817,13 @@ Napi::Value ReplaceIR(const Napi::CallbackInfo& info)
 
 // ── LoadPresetWorker + handler (moved verbatim from NodeAddon.cpp) ────────────────────
 
-class LoadPresetWorker : public Napi::AsyncWorker
+class LoadPresetWorker : public GuardedAsyncWorker<LoadPresetWorker>
 {
 public:
     LoadPresetWorker(Napi::Env env, Napi::Promise::Deferred deferred, std::string json)
-        : Napi::AsyncWorker(env), deferred_(deferred), presetJson_(std::move(json)) {}
+        : GuardedAsyncWorker(env), deferred_(deferred), presetJson_(std::move(json)) {}
 
-    void Execute() override
+    void ExecuteImpl()
     {
         // Release the rebuild barrier LoadPreset() armed before editor
         // teardown, on every exit path — editors may open again once the

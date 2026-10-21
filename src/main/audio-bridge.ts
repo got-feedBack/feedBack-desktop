@@ -2,12 +2,15 @@
 // The native addon is loaded via require() and its methods are
 // exposed to the renderer process via ipcMain.handle().
 
-import { ipcMain } from 'electron';
+import { ipcMain, dialog, BrowserWindow } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import { isDebugEnabled, getDebugLogPath } from './debug-log';
-import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
+import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath,
+         getCrashBlocklist, removeFromCrashBlocklist, clearCrashBlocklist, consumeStartupBlocked } from './vst-crash-guard';
+import { IPC_VST_GET_CRASH_BLOCKLIST, IPC_VST_REMOVE_FROM_CRASH_BLOCKLIST,
+         IPC_VST_CLEAR_CRASH_BLOCKLIST, IPC_VST_EVENT_PLUGIN_BLOCKED } from './ipc-channels';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
@@ -226,6 +229,32 @@ function writeAudioSettings(settings: unknown): boolean {
 // across moves so a reorder needs no upkeep.
 const vstSlotPaths = new Map<number, string>();
 
+// Non-blocking warning when a VST fails to load. The app must keep working
+// regardless of the plugin's origin or validity — a failed load is reported
+// to the user but never throws back into the renderer and never blocks it.
+function warnVstLoadFailed(pluginPath: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[audio] VST load failed for ${pluginPath}: ${message}`);
+    try {
+        const focused = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
+        const options: Electron.MessageBoxOptions = {
+            type: 'warning',
+            title: 'fee[dB]ack — plugin failed to load',
+            message: `The plugin "${path.basename(pluginPath)}" could not be loaded.`,
+            detail: `Path: ${pluginPath}\n\nError: ${message}\n\nThe application keeps running normally. You can try again or pick another plugin.`,
+            buttons: ['OK'],
+            noLink: true,
+            defaultId: 0,
+        };
+        const shown = focused
+            ? dialog.showMessageBox(focused, options)
+            : dialog.showMessageBox(options);
+        void shown.catch(() => { /* window may be gone; the console.warn above already recorded it */ });
+    } catch (e: any) {
+        console.warn(`[audio] Could not show VST warning dialog: ${e?.message ?? e}`);
+    }
+}
+
 function loadNativeAddon(): AudioModule | null {
     const addonPaths = [
         // Development build
@@ -249,6 +278,20 @@ function loadNativeAddon(): AudioModule | null {
     console.warn('[audio] Native audio addon not found — audio features disabled');
     console.warn('[audio] Build it with: npm run build:audio');
     return null;
+}
+
+// Broadcast any startup crash-blocklist promotions (plugins that crossed the
+// consecutive-crash threshold while the app was down) to every window. Called
+// from main.ts once the main renderer has painted — at initAudioBridge() time
+// only the splash window exists, and its preload has no vst listener, so an
+// immediate broadcast would be lost.
+export function flushVstBlockedNotifications(): void {
+    for (const entry of consumeStartupBlocked()) {
+        for (const win of BrowserWindow.getAllWindows()) {
+            if (!win.isDestroyed())
+                win.webContents.send(IPC_VST_EVENT_PLUGIN_BLOCKED, entry);
+        }
+    }
 }
 
 export function initAudioBridge(): void {
@@ -299,6 +342,24 @@ export function initAudioBridge(): void {
             console.warn(`[audio] VST crash guard init failed: ${e.message}`);
         }
     }
+
+    // VST crash blocklist management (Settings → Audio). Every mutation
+    // re-pushes the list to the addon so routing changes apply immediately
+    // (a removed entry loads in-process again on its next load; a cleared
+    // list lifts every sandbox pin).
+    ipcMain.handle(IPC_VST_GET_CRASH_BLOCKLIST, () => getCrashBlocklist());
+    ipcMain.handle(IPC_VST_REMOVE_FROM_CRASH_BLOCKLIST, (_event, pluginPath: string) => {
+        const removed = removeFromCrashBlocklist(pluginPath);
+        if (removed && audio && typeof audio.setCrashedPlugins === 'function')
+            audio.setCrashedPlugins(getCrashBlocklist());
+        return removed;
+    });
+    ipcMain.handle(IPC_VST_CLEAR_CRASH_BLOCKLIST, () => {
+        const removed = clearCrashBlocklist();
+        if (removed && audio && typeof audio.setCrashedPlugins === 'function')
+            audio.setCrashedPlugins([]);
+        return removed;
+    });
 
     // Load the Basic Pitch ONNX model for the polyphonic ML note detector.
     // Bundled offline (Constitution IV) under resources/models/. Fail-soft:
@@ -1175,6 +1236,12 @@ export function initAudioBridge(): void {
         let slotId = -1;
         try {
             slotId = (await audio?.loadVST(pluginPath)) ?? -1;
+        } catch (e: any) {
+            // A rejected load must surface as a warning, not as an unhandled
+            // IPC rejection the renderer never catches. Return -1 so callers
+            // treat it as "not loaded" and the app keeps running.
+            warnVstLoadFailed(pluginPath, e);
+            slotId = -1;
         } finally {
             disarmSentinel();
         }
@@ -1347,7 +1414,15 @@ export function initAudioBridge(): void {
     });
 
     ipcMain.handle('audio:loadPreset', async (_event, presetJson: string) => {
-        const result = await audio?.loadPreset(presetJson) ?? { success: false, error: 'No audio' };
+        let result: { success: boolean; error?: string; slotsLoaded?: number };
+        try {
+            result = await audio?.loadPreset(presetJson) ?? { success: false, error: 'No audio' };
+        } catch (e: any) {
+            // Never let a preset load failure reject the IPC promise — the
+            // renderer expects a result object and the app must keep running.
+            console.warn(`[audio] loadPreset failed: ${e?.message ?? e}`);
+            result = { success: false, error: e?.message ?? String(e) };
+        }
         // loadPreset rebuilds the native chain from scratch, so the cached
         // slotId→path map no longer reflects it. Clear it — openPluginEditor
         // then falls back to the live getChainState lookup for these slots

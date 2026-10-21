@@ -163,29 +163,39 @@ bool SubprocessHandle::startPosix(const juce::String& exePath,
 
     watcher = std::thread([this, pid]
     {
-        int status = 0;
-        int code = -1;
-        for (;;)
+        // Thread entry point: never let an exception escape — an uncaught
+        // C++ exception calls std::terminate and kills the whole host process.
+        try
         {
-            const pid_t w = ::waitpid(pid, &status, 0);
-            if (w == pid)
+            int status = 0;
+            int code = -1;
+            for (;;)
             {
-                if (WIFEXITED(status))        code = WEXITSTATUS(status);
-                else if (WIFSIGNALED(status)) code = 128 + WTERMSIG(status);
-                break;
+                const pid_t w = ::waitpid(pid, &status, 0);
+                if (w == pid)
+                {
+                    if (WIFEXITED(status))        code = WEXITSTATUS(status);
+                    else if (WIFSIGNALED(status)) code = 128 + WTERMSIG(status);
+                    break;
+                }
+                if (w < 0)
+                {
+                    if (errno == EINTR) continue;
+                    // ECHILD: someone else reaped it (e.g. libuv's SIGCHLD handler
+                    // inside Electron). Treat as exited with unknown status rather
+                    // than spinning — see the kqueue/EVFILT_PROC fallback note in
+                    // the design plan if this proves common.
+                    break;
+                }
             }
-            if (w < 0)
-            {
-                if (errno == EINTR) continue;
-                // ECHILD: someone else reaped it (e.g. libuv's SIGCHLD handler
-                // inside Electron). Treat as exited with unknown status rather
-                // than spinning — see the kqueue/EVFILT_PROC fallback note in
-                // the design plan if this proves common.
-                break;
-            }
+            running.store(false, std::memory_order_release);
+            if (onExitCb) onExitCb(code);
         }
-        running.store(false, std::memory_order_release);
-        if (onExitCb) onExitCb(code);
+        catch (...)
+        {
+            VST_TRACE("SubprocessHandle watcher: swallowed exception");
+            running.store(false, std::memory_order_release);
+        }
     });
     return true;
 }
@@ -209,20 +219,11 @@ void SubprocessHandle::shutdown(int timeoutMs)
             ::kill(impl->pid, SIGKILL);
     }
 
-    if (watcher.joinable())
-    {
-        if (std::this_thread::get_id() == watcher.get_id())
-        {
-            // Self-join would deadlock. Detaching is safe for the same reasons
-            // documented in the Windows backend: SandboxedProcessor::teardown
-            // drops the onCrash callback before calling shutdown(), and the
-            // watcher touches no member state after onExitCb beyond the atomic
-            // `running` store.
-            watcher.detach();
-        }
-        else
-            watcher.join();
-    }
+    // Serialised join/detach — same double-join race as the Windows backend;
+    // see ThreadJoin.h and SubprocessHandle_win.cpp::shutdown.
+    joinThreadOnce(watcher, impl->watcherJoin, "subprocess-watcher");
+
+    std::lock_guard<std::mutex> lk(impl->closeMutex);
     impl->pid = -1;
 }
 

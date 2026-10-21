@@ -11,6 +11,14 @@ import type { ConfigPathCategories } from './config-paths';
 
 // Shape returned by maintenance.getPaths() — the enumerated per-OS categories
 // plus the resolved active CONFIG_DIR and a flag for the shared Docker dir.
+// Payload of the vst:pluginBlocked push — a plugin crossed the consecutive-
+// crash threshold and was blocklisted (it routes to the sandbox from now on).
+export interface VstPluginBlockedPayload {
+    path: string;
+    count: number;
+    op: 'load' | 'editor';
+}
+
 export interface MaintenancePaths {
     configDir: string;
     userData: string;
@@ -39,6 +47,10 @@ import {
     IPC_MAINTENANCE_RESTART,
     IPC_PANE_SYNC,
     IPC_PANE_EVENT_TOGGLE,
+    IPC_VST_GET_CRASH_BLOCKLIST,
+    IPC_VST_REMOVE_FROM_CRASH_BLOCKLIST,
+    IPC_VST_CLEAR_CRASH_BLOCKLIST,
+    IPC_VST_EVENT_PLUGIN_BLOCKED,
 } from './ipc-channels';
 
 // Auto-update channel + event payloads. Kept here (rather than re-exported
@@ -479,6 +491,22 @@ const feedBackDesktopApi = {
         // Tone switching
         setMultiBypass: (changes: Array<{slotId: number, bypassed: boolean}>) =>
             ipcRenderer.invoke('audio:setMultiBypass', changes),
+    },
+
+    // VST crash blocklist (desktop only). Settings → Audio lists the plugins
+    // the crash guard has blocklisted after repeated consecutive crashes;
+    // entries can be removed individually or cleared, and main re-pushes the
+    // new list to the addon so routing changes apply immediately.
+    vst: {
+        getCrashBlocklist: (): Promise<string[]> => ipcRenderer.invoke(IPC_VST_GET_CRASH_BLOCKLIST),
+        removeFromCrashBlocklist: (pluginPath: string): Promise<boolean> =>
+            ipcRenderer.invoke(IPC_VST_REMOVE_FROM_CRASH_BLOCKLIST, pluginPath),
+        clearCrashBlocklist: (): Promise<number> => ipcRenderer.invoke(IPC_VST_CLEAR_CRASH_BLOCKLIST),
+        onPluginBlocked: (callback: (payload: VstPluginBlockedPayload) => void) => {
+            const listener = (_event: unknown, payload: VstPluginBlockedPayload) => callback(payload);
+            ipcRenderer.on(IPC_VST_EVENT_PLUGIN_BLOCKED, listener);
+            return () => ipcRenderer.removeListener(IPC_VST_EVENT_PLUGIN_BLOCKED, listener);
+        },
     },
 
     // Trusted executor for core audio-effects chain plans. Providers pass

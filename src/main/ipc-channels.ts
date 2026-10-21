@@ -66,3 +66,15 @@ export const IPC_PANE_SYNC = 'pane:sync' as const;
 // Main → renderer: the tray asked to open or close a pane. Only the renderer knows
 // what that means — the pane may belong in the dock, and its element lives there.
 export const IPC_PANE_EVENT_TOGGLE = 'pane:toggle' as const;
+
+// VST crash blocklist — the Settings → Audio panel lists and edits it, so a
+// plugin that works fine can always be un-blocklisted without deleting files
+// by hand. Mutations re-push the list to the addon (see audio-bridge.ts).
+export const IPC_VST_GET_CRASH_BLOCKLIST = 'vst:getCrashBlocklist' as const;
+export const IPC_VST_REMOVE_FROM_CRASH_BLOCKLIST = 'vst:removeFromCrashBlocklist' as const;
+export const IPC_VST_CLEAR_CRASH_BLOCKLIST = 'vst:clearCrashBlocklist' as const;
+
+// Main → renderer push: a plugin just crossed the consecutive-crash threshold
+// and was blocklisted (it routes to the sandbox from now on). Broadcast once
+// the renderer has painted (flushVstBlockedNotifications in audio-bridge.ts).
+export const IPC_VST_EVENT_PLUGIN_BLOCKED = 'vst:pluginBlocked' as const;
