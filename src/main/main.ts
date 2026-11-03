@@ -496,7 +496,13 @@ function createWindow(port: number): void {
         height: restored.height,
         minWidth: MIN_WIDTH,
         minHeight: MIN_HEIGHT,
-        fullscreen: startFullscreen,
+        // macOS: an EXPLICIT `fullscreen: false` makes Electron create the
+        // window non-fullscreenable (green button disabled, setFullScreen(true)
+        // and the View → Toggle Full Screen menu silently ignored). Only pass
+        // the key when actually starting fullscreen, and keep the window
+        // fullscreenable either way.
+        fullscreenable: true,
+        ...(startFullscreen ? { fullscreen: true } : {}),
         title: 'fee[dB]ack',
         backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
         webPreferences: rendererWebPreferences,
@@ -1346,12 +1352,9 @@ async function startup(): Promise<void> {
         const value = on === true;
         setDesktopConfig({ startFullscreen: value });
         // Live-apply so the toggle is responsive, not silent-until-relaunch.
-        // Works on the first toggle on Windows/Linux. On macOS the FIRST enter on
-        // a window created windowed is dropped by AppKit (its native-fullscreen
-        // state machine isn't engaged until the window has been fullscreen once —
-        // creating with `fullscreen: true` engages it), so there it takes effect
-        // on next launch instead; the core Settings note tells macOS users that.
-        // Reliable live both ways once the window has entered fullscreen once.
+        // Works on every platform, including the first enter on macOS: the
+        // window is created fullscreenable (createWindow() never passes an
+        // explicit `fullscreen: false`, which on macOS disabled fullscreen).
         if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen() !== value) {
             mainWindow.setFullScreen(value);
         }
